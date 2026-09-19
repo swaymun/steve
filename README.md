@@ -2,7 +2,7 @@
 
 **Text a Codex agent through iMessage.**
 
-Steve runs on your Mac, uses your existing Codex login and browser session, and sends results back to your phone. Ask it to research, work in apps, manage reminders, or record what it did.
+Steve runs on your Mac, uses your existing Codex login and browser session, and sends results back through iMessage. No OpenAI API key or iPhone app is required. Ask it to research the web, operate apps, manage reminders, check connected services, or send back files and recordings.
 
 <img src="guide/images/messages-reminder.png" alt="A real Messages exchange: asking Steve to remind you to stretch, receiving a confirmation in EDT, then cancelling the reminder." width="800">
 
@@ -25,9 +25,28 @@ iPhone → iMessage → Steve on your Mac → Codex → apps and websites
        ← results, files, and recordings ←
 ```
 
-**Development preview:** iMessage tasks, browser research, reminders, email reads, and video delivery have been exercised on a Mac. Phone login, iPhone video playback, and calendar support have [remaining acceptance gaps](guide/practical-benchmark-20260919.md). MIT licensed.
+**Development preview:** iMessage tasks, browser research, reminders, email reads, and video delivery have been exercised on a Mac. Phone login, iPhone video playback, and calendar support have [remaining limitations](guide/preview-limitations.md). MIT licensed.
+
+<details>
+<summary><strong>See real tasks: restaurant research and a recorded document</strong></summary>
+
+**Check dinner availability.** Steve checked restaurant menus and live booking pages for two people in Austin, including vegetarian options and outdoor seating. This original browser capture shows the date, party size, and available times observed on September 19, 2026. No reservation was submitted; availability can change.
+
+<img src="guide/images/restaurant-availability.jpg" alt="Steve's original browser capture of True Food Kitchen in Austin: two people, September 25, 2026, with available dinner times including 7 PM and 7:30 PM." width="800">
+
+**Create a file and send a recording.** Steve saved a four-line Weekend plan in TextEdit and delivered the file and a document-only video through iMessage. This frame shows the finished note with “Ready for review” selected. It shows the final state, not the editing or window-closing sequence.
+
+<img src="guide/images/weekend-plan-upscaled.png" alt="AI-upscaled frame from Steve's delivered recording: Weekend plan.txt in TextEdit, with Buy groceries, Go for a walk, Read a book, and Ready for review on four lines. The final line is selected." width="600">
+
+AI-upscaled for readability; [view the original video frame](guide/images/weekend-plan-original.png). The original recording was decoded and checked on a Mac; physical iPhone playback remains unverified.
+
+</details>
+
+**Requires:** an Apple silicon Mac with macOS 14+, Codex, and a **separate Messages account on the Mac running Steve**. Computer Use has its own availability and macOS requirements; see [setup](guide/setup.md). Same-account self-messaging is outside this setup flow.
 
 ## Install with an agent
+
+Native Computer Use lets Steve operate visible apps and websites on your Mac.
 
 Give a local Codex agent [this repository](https://github.com/swaymun/steve) and say:
 
