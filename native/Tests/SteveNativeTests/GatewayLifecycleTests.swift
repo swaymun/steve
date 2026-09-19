@@ -400,15 +400,26 @@ final class GatewayLifecycleTests: XCTestCase {
         XCTAssertEqual(second.executionState, "idle")
     }
     func testUnknownWorkerResumeFailureDoesNotStartReplacementOrReplay() async throws {
-        let control = #"{"schemaVersion":1,"kind":"relay_request","action":"control","control":{"operation":"schedule_list","userQuote":"List my schedules"}}"#
-        let (store, gateway, _, codex) = try await setup([control], withAutomation: true)
-        await gateway.start(); await gateway.receive(inbound("original-control", text: "List my schedules"))
-        try await eventually { try await store.queueState("inbound:original-control") == "completed" }
+        // This test exercises a resumed pair, not schedule creation/delivery.
+        // Seed that durable precondition rather than racing startup scheduling
+        // and waiting for an unrelated control's outbound confirmation first.
+        let (store, gateway, _, codex) = try await setup([])
+        let settingsValue = try await store.getSettings()
+        let settings = try XCTUnwrap(settingsValue)
+        let original = SteveStore.AgentSession(chatGuid: "chat", threadID: "existing-worker", relayThreadID: "existing-relay", relayPromptVersion: StevePrompt.relayPromptVersion,
+            workspacePath: try XCTUnwrap(settings.workspaceRoot), permissionProfile: "workspace-write", model: settings.model, effort: settings.effort,
+            lastMessageGuid: "original-control", executionState: "idle", updatedAt: Date())
+        try await store.saveAgentSession(original)
         await codex.failWorkerResume("Codex App Server request failed (-32600)")
+        await gateway.start()
         await gateway.receive(inbound("unknown-resume", text: "List my schedules"))
         try await eventually { try await store.queueState("inbound:unknown-resume") == "failed" }
-        let starts = await codex.startTiers, turns = await codex.turns
-        XCTAssertEqual(starts.count, 2); XCTAssertEqual(turns, 1)
+        let starts = await codex.startTiers, turns = await codex.turns, resumes = await codex.resumeTiers
+        let retained = try await store.agentSession(for: "chat")
+        XCTAssertEqual(resumes, ["worker:standard"])
+        XCTAssertTrue(starts.isEmpty); XCTAssertEqual(turns, 0)
+        XCTAssertEqual(retained?.threadID, original.threadID)
+        XCTAssertEqual(retained?.relayThreadID, original.relayThreadID)
     }
     func testSuccessfulScheduleControlDeliversCreatedIdentifierAndSettlesSession() async throws {
         let quote = "Remind me every Friday at 4 pm America/Chicago to review tasks and tell me its identifier"

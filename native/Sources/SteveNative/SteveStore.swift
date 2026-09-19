@@ -62,6 +62,9 @@ actor SteveStore {
             withIntermediateDirectories: true
         )
         connection = try Connection(databaseURL.path)
+        // Automation uses another connection to this WAL database. Wait for
+        // its brief write transactions instead of losing intake or delivery.
+        connection.busyTimeout = 5
         try Self.migrate(connection)
     }
 
@@ -329,7 +332,7 @@ actor SteveStore {
     }
 
     func stageDelivery(_ parts: [OutboundPart], inboxGUIDs: [String], expectedEpoch: String? = nil) throws {
-        try connection.transaction {
+        try connection.transaction(.immediate) {
             if let expectedEpoch, try gatewayEpoch() != expectedEpoch { throw CancellationError() }
             for part in parts { try insertQueue(id: part.id, direction: "outbound", payload: part) }
             try finishInbox(inboxGUIDs, state: parts.isEmpty ? "completed" : "awaiting_delivery")
@@ -391,7 +394,7 @@ actor SteveStore {
     }
 
     func failOutboundPart(_ part: OutboundPart) throws {
-        try connection.transaction {
+        try connection.transaction(.immediate) {
             let pending = try queuePayloads(OutboundPart.self, direction: "outbound", state: "pending")
             for value in pending where value.id == part.id || !Set(value.inboxGUIDs).isDisjoint(with: part.inboxGUIDs) {
                 try connection.run("UPDATE queue SET state = 'failed' WHERE id = ? AND state = 'pending'", value.id)
