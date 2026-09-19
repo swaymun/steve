@@ -474,9 +474,20 @@ actor GatewayCoordinator {
             else { try await setPaused(false); response = "Steve is ready." }
         case "status", "/status":
             let counts = try await store.workCounts(excludingGUID: message.guid)
-            let state = paused ? "paused" : counts.running > 0 ? "working" : "ready"
-            response = "Steve is \(state). \(counts.pending) queued, \(counts.uncertain) uncertain outcomes, \(counts.failed) failed requests."
+            response = paused ? "Steve is paused." : counts.running > 0 ? "Steve is working." :
+                counts.uncertain > 0 || transportError != nil ? "Steve needs attention." : "Steve is ready."
+            if counts.pending > 0 {
+                response! += " \(counts.pending) request\(counts.pending == 1 ? " is" : "s are") waiting."
+            } else if counts.running == 0 && counts.uncertain == 0 && transportError == nil {
+                response! += " Nothing is waiting."
+            }
+            if counts.uncertain > 0 {
+                response! += " Some earlier work needs review because its outcome couldn't be confirmed; it hasn't been retried."
+            }
             if let transportError { response! += " Messages: " + transportError }
+            if counts.failed > 0 {
+                response! += "\n\nHistory: \(counts.failed) earlier request\(counts.failed == 1 ? "" : "s") failed."
+            }
         default: break
         }
         if let response {

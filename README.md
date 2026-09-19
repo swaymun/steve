@@ -12,7 +12,7 @@ An actual conversation with Steve running on another Mac. The reminder was cance
 
 Use a Mac running macOS 14 or later, signed in to Messages, with Codex installed and signed in. The Mac must stay awake and Steve must remain running to perform tasks. Basic messaging needs no iPhone extension or companion app.
 
-[Download Steve v0.1.0 for Apple silicon](https://github.com/swaymun/steve/releases/download/v0.1.0/Steve-macOS.zip) · [SHA-256 checksum](https://github.com/swaymun/steve/releases/download/v0.1.0/Steve-macOS.zip.sha256) · [Release notes](https://github.com/swaymun/steve/releases/tag/v0.1.0)
+[Download Steve v0.1.1 for Apple silicon](https://github.com/swaymun/steve/releases/download/v0.1.1/Steve-macOS.zip) · [SHA-256 checksum](https://github.com/swaymun/steve/releases/download/v0.1.1/Steve-macOS.zip.sha256) · [Release notes](https://github.com/swaymun/steve/releases/tag/v0.1.1)
 
 The prebuilt development preview is signed with Developer ID and notarized by Apple. Verify the download using [the setup guide](guide/setup.md#install-a-release), then move `Steve.app` to Applications. No source build is needed. This archive is for Apple silicon (arm64); Intel users can try [building from source](guide/setup.md#build-from-source), but Intel builds have not been validated.
 

@@ -4,7 +4,7 @@ Steve runs in a signed-in macOS user session. Use an Apple account signed in to 
 
 ## Install a release
 
-The [v0.1.0 development preview](https://github.com/swaymun/steve/releases/tag/v0.1.0) includes a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Download [`Steve-macOS.zip`](https://github.com/swaymun/steve/releases/download/v0.1.0/Steve-macOS.zip) and [`Steve-macOS.zip.sha256`](https://github.com/swaymun/steve/releases/download/v0.1.0/Steve-macOS.zip.sha256). GitHub's automatic source archives are not the app. Intel builds have not been validated.
+The [v0.1.1 development preview](https://github.com/swaymun/steve/releases/tag/v0.1.1) includes a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Download [`Steve-macOS.zip`](https://github.com/swaymun/steve/releases/download/v0.1.1/Steve-macOS.zip) and [`Steve-macOS.zip.sha256`](https://github.com/swaymun/steve/releases/download/v0.1.1/Steve-macOS.zip.sha256). GitHub's automatic source archives are not the app. Intel builds have not been validated.
 
 Download both files from the same release. In the folder containing the downloads, verify the checksum before opening the archive:
 
@@ -70,7 +70,9 @@ See the [permissions table](../README.md#permissions-and-privacy) for each grant
 
 `setup --pair` returns a short-lived code and the receiving address. Send that code in a private iMessage to the displayed Mac account. Do not publish the output or paste passwords, one-time authentication codes, cookies, or payment details into the conversation. Pairing codes authorize one exact conversation and sender.
 
-`stop` pauses/cancels the operator; `start` resumes it. They do not quit or relaunch the menu-bar app. Use the app's Quit action to shut down cleanly.
+An iMessage status reply describes current work first. Past failures appear separately under History and remain saved; they are not queued for retry. Unconfirmed outcomes still need review and are never automatically rerun.
+
+`steve stop` pauses/cancels the operator; `steve start` resumes it. In iMessage, say “stop” or “resume.” These commands do not quit or relaunch the menu-bar app. Use the app's Quit action to shut down cleanly.
 
 ## Optional Tailscale setup
 

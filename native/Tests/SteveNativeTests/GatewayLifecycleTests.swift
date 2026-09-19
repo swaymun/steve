@@ -637,9 +637,9 @@ final class GatewayLifecycleTests: XCTestCase {
         await gateway.start()
         try await eventually { try await store.queueState("removed-text") == "failed" }
         await gateway.receive(inbound("next-status", text: "status"))
-        try await eventually { await messages.sent.count == 1 }
+        try await eventually { await messages.sent.count == 2 }
         let sent = await messages.sent
-        XCTAssertFalse(sent.contains("Success")); XCTAssertTrue(sent[0].contains("1 failed requests"))
+        XCTAssertFalse(sent.contains("Success")); XCTAssertEqual(sent[1], "History: 1 earlier request failed.")
     }
     func testUncertainWorkerGetsOneDurableNoticeWithoutClearingUncertainty() async throws {
         let (store, gateway, messages, _) = try await setup([relay, "malformed"])
@@ -657,6 +657,45 @@ final class GatewayLifecycleTests: XCTestCase {
         try await eventually { await messages.sent.count == 1 }
         let sent = await messages.sent, turns = await codex.turns
         XCTAssertTrue(sent[0].contains("working")); XCTAssertEqual(turns, 2)
+    }
+    func testStatusSeparatesHistoricalFailuresWithoutChangingTheirRecords() async throws {
+        let (store, gateway, messages, codex) = try await setup([])
+        for index in 1...4 {
+            let old = inbound("past-failure-\(index)")
+            _ = try await store.acceptInbound(old)
+            _ = try await store.claimInbox([old.guid])
+            try await store.finishInbox([old.guid], state: "failed")
+        }
+        await gateway.start()
+        try await eventually { await gateway.transportError == nil }
+        await gateway.receive(inbound("current-status", text: "status"))
+        try await eventually { await messages.sent.count == 2 }
+        let sent = await messages.sent
+        XCTAssertEqual(sent, ["Steve is ready. Nothing is waiting.", "History: 4 earlier requests failed."])
+        let counts = try await store.workCounts(excludingGUID: "current-status")
+        let turns = await codex.turns
+        XCTAssertEqual(counts.failed, 4, "Status must preserve failure history, not erase or retry it")
+        XCTAssertEqual(counts.pending, 0)
+        XCTAssertEqual(turns, 0)
+    }
+    func testStatusKeepsUnconfirmedWorkVisibleAsNeedingAttention() async throws {
+        let (store, gateway, messages, codex) = try await setup([])
+        let uncertain = inbound("unconfirmed")
+        _ = try await store.acceptInbound(uncertain)
+        _ = try await store.claimInbox([uncertain.guid])
+        try await store.finishInbox([uncertain.guid], state: "uncertain")
+        await gateway.start()
+        try await eventually { await gateway.transportError == nil }
+        await gateway.receive(inbound("review-status", text: "status"))
+        try await eventually { await messages.sent.count == 1 }
+        let sent = await messages.sent
+        XCTAssertTrue(sent[0].hasPrefix("Steve needs attention."))
+        XCTAssertTrue(sent[0].contains("needs review"))
+        XCTAssertFalse(sent[0].contains("Nothing is waiting."))
+        let outcome = try await store.queueState("inbound:unconfirmed")
+        let turns = await codex.turns
+        XCTAssertEqual(outcome, "uncertain")
+        XCTAssertEqual(turns, 0)
     }
     func testConnectionSetupRejectsApprovalAndKeepsURLLocalUntilExplicitHandoff() async throws {
         let (store, gateway, messages, codex) = try await setup([relay, worker])
