@@ -29,3 +29,7 @@ Use a per-task table rather than collapsing correctness, safety, and speed into 
 [AssistantBench](https://github.com/oriyor/assistantbench) motivates the sustained research task. [OSWorld](https://os-world.github.io/) motivates checking actual application state and outputs independently. This suite does not run either benchmark's official environment or grading system and must not be presented as an official leaderboard score.
 
 Publish only sanitized task outcomes and methodology. Provide useful private deliverables directly to the operator. A missing account connection is a setup finding; a completed synthetic task is not evidence of real email or calendar access.
+
+## September 19 pilot results
+
+The [outcome report](practical-benchmark-20260919.md) contains all 16 original attempts, timing, build differences, and focused repair checks. Raw account and recording evidence stays private. A future task-pack version should fence B07's exact expected text: its current sentence punctuation is ambiguous. The frozen v1 prompts and original grades remain unchanged.
