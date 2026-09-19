@@ -141,52 +141,71 @@ final class GatewayLifecycleTests: XCTestCase {
         let decision = await codex.approvalDecision
         XCTAssertEqual(decision, .cancel)
     }
-    private func dueSchedule(_ store: SteveStore, kind: UserScheduleKind) async throws -> (SteveUserAutomationStore, UserSchedule, Date) {
+    private func dueSchedule(_ store: SteveStore, kind: UserScheduleKind, now: Date = Date()) async throws -> (SteveUserAutomationStore, UserSchedule, Date) {
         let automation = try SteveUserAutomationStore(databaseURL: store.databaseURL)
         let settings = try await store.getSettings()!
         let boundary = try ScheduleAuthorization(chatGUID: "chat", senderHandle: "user@example.test", workspace: settings.workspaceRoot!, permission: "workspace-write")
-        let now = Date()
         let item = try await automation.createSchedule(requestID: UUID().uuidString, name: "Fixture", prompt: "Read fixture status", kind: kind, rule: .once(at: now.addingTimeInterval(60)), timeZone: "UTC", authorization: boundary, provenance: .init(source: .pairedMessage, sourceID: "schedule-request", statement: "Schedule reading fixture status in one minute", explicitlyRequested: true, recordedAt: now), now: now)
         return (automation, item, now.addingTimeInterval(61))
     }
     func testScheduledReminderUsesDurableDeliveryWithoutWorkerAndWaitsForSent() async throws {
-        let (store, gateway, messages, codex) = try await setup([], withAutomation: true)
+        let clock = FixtureClock()
+        let (store, gateway, messages, codex) = try await setup([], withAutomation: true, clock: clock)
         await gateway.start(); await messages.holdDelivery()
-        let (automation, item, due) = try await dueSchedule(store, kind: .reminder)
-        try await gateway.pollSchedules(now: due)
-        try await eventually { try await automation.runs(scheduleID: item.id).first?.state == .enqueued }
-        try await gateway.pollSchedules(now: due)
+        let (automation, item, _) = try await dueSchedule(store, kind: .reminder, now: clock.now())
+        clock.advance(61)
+        try await eventually {
+            try await gateway.pollSchedules(now: clock.now())
+            return try await automation.runs(scheduleID: item.id).first?.state == .enqueued
+        }
         let before = try await automation.runs(scheduleID: item.id).first!
         XCTAssertEqual(before.state, .enqueued)
         await messages.releaseDelivery()
         try await eventually { try await store.queueState("inbound:" + before.downstreamID!) == "completed" }
-        try await gateway.pollSchedules(now: due)
+        try await eventually {
+            try await gateway.pollSchedules(now: clock.now())
+            return try await automation.run(id: before.id)?.state == .succeeded
+        }
         let after = try await automation.run(id: before.id), turns = await codex.turns
         XCTAssertEqual(after?.state, .succeeded); XCTAssertEqual(turns, 0)
         let sent = await messages.sent; XCTAssertTrue(sent.joined().contains("Reminder:"))
     }
     func testScheduledCompletedWorkerWithUncertainDeliveryDoesNotSucceed() async throws {
         let plan = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Done"],"attachments":[]}"#
-        let (store, gateway, messages, _) = try await setup([relay, worker, plan], withAutomation: true)
+        let clock = FixtureClock()
+        let (store, gateway, messages, _) = try await setup([relay, worker, plan], withAutomation: true, clock: clock)
         await gateway.start(); await messages.configure(failSend: true)
-        let (automation, item, due) = try await dueSchedule(store, kind: .task)
-        try await gateway.pollSchedules(now: due)
-        try await eventually { try await store.uncertainWorkCount() > 0 }
-        try await gateway.pollSchedules(now: due)
+        let (automation, item, _) = try await dueSchedule(store, kind: .task, now: clock.now())
+        clock.advance(61)
+        // The automatic scheduler can already own a poll when a manual tick
+        // arrives. Overlapping ticks intentionally coalesce. Drive the shared
+        // clock until reconciliation finishes, not just one tick's return.
+        try await eventually {
+            try await gateway.pollSchedules(now: clock.now())
+            return try await automation.runs(scheduleID: item.id).first?.state == .uncertain
+        }
         let run = try await automation.runs(scheduleID: item.id).first!
         XCTAssertEqual(run.executionOutcome, .succeeded)
         XCTAssertEqual(run.state, .uncertain)
-        try await gateway.pollSchedules(now: due.addingTimeInterval(600))
+        let inboxState = try await store.queueState("inbound:" + run.downstreamID!)
+        XCTAssertEqual(inboxState, "uncertain")
+        clock.advance(600)
+        try await gateway.pollSchedules(now: clock.now())
         let all = try await automation.runs(scheduleID: item.id); XCTAssertEqual(all.count, 1)
     }
     func testPausedSchedulerDoesNotClaimUntilExplicitResume() async throws {
-        let (store, gateway, messages, _) = try await setup([], withAutomation: true)
+        let clock = FixtureClock()
+        let (store, gateway, messages, _) = try await setup([], withAutomation: true, clock: clock)
         await gateway.start(); try await gateway.setPaused(true)
-        let (automation, item, due) = try await dueSchedule(store, kind: .reminder)
-        try await gateway.pollSchedules(now: due)
+        let (automation, item, _) = try await dueSchedule(store, kind: .reminder, now: clock.now())
+        clock.advance(61)
+        try await gateway.pollSchedules(now: clock.now())
         let before = try await automation.runs(scheduleID: item.id); XCTAssertTrue(before.isEmpty)
-        try await gateway.setPaused(false); try await gateway.pollSchedules(now: due)
-        try await eventually { await messages.sent.count > 0 }
+        try await gateway.setPaused(false)
+        try await eventually {
+            try await gateway.pollSchedules(now: clock.now())
+            return await messages.sent.count > 0
+        }
         let after = try await automation.runs(scheduleID: item.id); XCTAssertEqual(after.count, 1)
     }
     func testSettingsChangeRevokesSchedulesEvenIfSameBoundaryIsRestored() async throws {
