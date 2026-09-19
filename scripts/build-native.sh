@@ -63,6 +63,9 @@ iconutil --convert icns --output "$app/Contents/Resources/icon.icns" "$tmp_dir/S
 signing_identity=${APPLE_SIGNING_IDENTITY:-${STEVE_CODESIGN_IDENTITY:--}}
 
 chmod 755 "$app/Contents/MacOS/Steve"
+# Remove local build paths and debug symbols before the distributable bundle is
+# signed. Swift release binaries otherwise retain checkout-specific paths.
+/usr/bin/strip -S "$app/Contents/MacOS/Steve"
 codesign --force --sign "$signing_identity" "$app/Contents/MacOS/Steve" >/dev/null
 codesign --force --sign "$signing_identity" "$app" >/dev/null
 echo "$app"
