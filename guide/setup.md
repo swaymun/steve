@@ -93,7 +93,7 @@ Ask Steve to remember, list, or forget a preference. Forget removes the active s
 
 ## Reminders and scheduled tasks
 
-Ask normally: “Remind me in two minutes to check the oven.” For a clock time, Steve uses your requested timezone, a saved timezone preference, or the configured timezone and includes it in the confirmation. If needed, say “Remember that my timezone is Eastern time.” You can also ask Steve to list or cancel schedules in normal language. The Mac and Steve must be running for execution; after downtime, missed recurring occurrences are coalesced instead of replaying every missed run.
+Ask normally: “Remind me in two minutes to check the oven.” For a clock time, Steve uses your requested timezone, a saved timezone preference, or the Mac’s local timezone and shows the date-correct abbreviation (for example, EST/EDT or PST/PDT) in the confirmation. The original unset UTC default falls back to the Mac’s zone; explicit non-UTC settings are preserved. If needed, say “Remember that my timezone is Eastern time.” You can also ask Steve to list or cancel schedules in normal language. The Mac and Steve must be running for execution; after downtime, missed recurring occurrences are coalesced instead of replaying every missed run.
 
 Schedules remain bound to the paired chat, workspace, and permission choices. An uncertain task or delivery outcome blocks later automatic occurrences until reviewed. Live checks verified a one-time reminder across restart and a recurring reminder paused across restart with zero executions. Daylight-saving transitions still need separate installed-device acceptance.
 

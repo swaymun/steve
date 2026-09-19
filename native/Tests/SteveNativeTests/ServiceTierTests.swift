@@ -2,6 +2,12 @@ import XCTest
 @testable import SteveNative
 
 final class ServiceTierTests: XCTestCase {
+    func testLegacyUTCDefaultUsesLocalTimeButExplicitZoneIsPreserved() throws {
+        let local = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        XCTAssertEqual(StevePrompt.defaultTimeZone(configured: "UTC", local: local), "America/New_York")
+        XCTAssertEqual(StevePrompt.defaultTimeZone(configured: "invalid", local: local), "America/New_York")
+        XCTAssertEqual(StevePrompt.defaultTimeZone(configured: "America/Los_Angeles", local: local), "America/Los_Angeles")
+    }
     func testFullAccessUsesNoCommandApprovalsOnStartAndResume() async throws {
         let client = CodexAppServerClient()
         for id: String? in [nil, "existing-thread"] {

@@ -128,11 +128,17 @@ enum UserControlExecutor {
             let identifier = control.includeIdentifiers == true ? " Identifier: \(created.id)." : ""
             return "\(created.kind == .reminder ? "Reminder set" : "Task scheduled"): \(created.name). Next: \(next).\(identifier)"
         case .schedulePause, .scheduleResume:
+            let schedule = try await store.schedule(id: control.scheduleID!)
+            let name = schedule?.name ?? "that task"
             try await store.setSchedulePaused(id: control.scheduleID!, paused: control.operation == .schedulePause, provenance: provenance, now: now, expectedEpoch: epoch)
-            return control.operation == .schedulePause ? "Paused that schedule. An already running task is separate; /stop pauses Steve." : "Resumed that schedule. Missed occurrences will coalesce into at most one run."
+            return control.operation == .schedulePause
+                ? (schedule?.kind == .reminder ? "Paused the \(name) reminder." : "Paused future runs of \(name).")
+                : "Resumed \(name)."
         case .scheduleCancel:
+            let schedule = try await store.schedule(id: control.scheduleID!)
+            let name = schedule?.name ?? "that task"
             try await store.cancelSchedule(id: control.scheduleID!, provenance: provenance, now: now, expectedEpoch: epoch)
-            return "Cancelled future occurrences of that schedule. An already running task is separate; /stop pauses Steve."
+            return schedule?.kind == .reminder ? "Canceled the \(name) reminder." : "Canceled future runs of \(name)."
         case .scheduleResolve:
             try await store.resolveUncertainRun(id: control.runID!, state: control.resolution!, provenance: provenance, now: now, expectedEpoch: epoch)
             return "Recorded the outcome you supplied. That occurrence will not be replayed."
@@ -144,6 +150,7 @@ enum UserControlExecutor {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(identifier: timeZone)
         formatter.dateFormat = "EEE, MMM d 'at' h:mm a"
-        return formatter.string(from: date) + " (" + timeZone + ")"
+        let label = formatter.timeZone.abbreviation(for: date) ?? timeZone
+        return formatter.string(from: date) + " (" + label + ")"
     }
 }

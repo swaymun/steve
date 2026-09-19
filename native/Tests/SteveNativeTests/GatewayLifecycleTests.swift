@@ -451,7 +451,7 @@ final class GatewayLifecycleTests: XCTestCase {
         let schedule = try XCTUnwrap(schedules.first)
         let sent = await messages.sent.joined()
         XCTAssertTrue(sent.contains("Reminder set: Stretch"))
-        XCTAssertTrue(sent.contains("2:30 PM (America/New_York)"))
+        XCTAssertTrue(sent.contains("2:30 PM (EST)"))
         XCTAssertFalse(sent.contains(schedule.id))
         XCTAssertFalse(sent.contains("2099-01-05T"))
     }
