@@ -46,7 +46,7 @@ spctl --assess --type execute --context context:primary-signature -vv "$app"
 # the stapled app so the checksum describes the downloadable artifact.
 rm -f "$archive"
 ditto -c -k --keepParent "$app" "$archive"
-shasum -a 256 "$archive" > "$archive.sha256"
+(cd artifacts && shasum -a 256 Steve-macOS.zip > Steve-macOS.zip.sha256)
 
 echo "$app"
 echo "$archive"

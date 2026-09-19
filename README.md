@@ -12,7 +12,9 @@ An actual conversation with Steve running on another Mac. The reminder was cance
 
 Use a Mac running macOS 14 or later, signed in to Messages, with Codex installed and signed in. The Mac must stay awake and Steve must remain running to perform tasks. Basic messaging needs no iPhone extension or companion app.
 
-Prebuilt downloads will be on [GitHub Releases](https://github.com/swaymun/steve/releases). **The first signed, notarized download is still pending.** Once available, download `Steve-macOS.zip` and its SHA-256 checksum, verify them using [the setup guide](guide/setup.md#install-a-release), and move `Steve.app` to Applications. Release notes identify the supported Mac architecture. Until that archive is published, [source installation](guide/setup.md#build-from-source) is available.
+[Download Steve v0.1.0 for Apple silicon](https://github.com/swaymun/steve/releases/download/v0.1.0/Steve-macOS.zip) · [SHA-256 checksum](https://github.com/swaymun/steve/releases/download/v0.1.0/Steve-macOS.zip.sha256) · [Release notes](https://github.com/swaymun/steve/releases/tag/v0.1.0)
+
+The prebuilt development preview is signed with Developer ID and notarized by Apple. Verify the download using [the setup guide](guide/setup.md#install-a-release), then move `Steve.app` to Applications. No source build is needed. This archive is for Apple silicon (arm64); Intel users can try [building from source](guide/setup.md#build-from-source), but Intel builds have not been validated.
 
 Open Steve, finish Codex sign-in and macOS permissions, choose a workspace and access profile, then pair your private iMessage conversation with the displayed code. Add Steve as a contact on your phone and ask for a task in normal language.
 

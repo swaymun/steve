@@ -4,16 +4,15 @@ Steve runs in a signed-in macOS user session. Use an Apple account signed in to 
 
 ## Install a release
 
-The first prebuilt release is awaiting signing and notarization. Check [GitHub Releases](https://github.com/swaymun/steve/releases) for a published `Steve-macOS.zip` and `Steve-macOS.zip.sha256`; GitHub's automatic source archives are not the app. Do not assume a release exists just because this guide describes installation. Match the architecture in the release notes to your Mac.
+The [v0.1.0 development preview](https://github.com/swaymun/steve/releases/tag/v0.1.0) includes a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Download [`Steve-macOS.zip`](https://github.com/swaymun/steve/releases/download/v0.1.0/Steve-macOS.zip) and [`Steve-macOS.zip.sha256`](https://github.com/swaymun/steve/releases/download/v0.1.0/Steve-macOS.zip.sha256). GitHub's automatic source archives are not the app. Intel builds have not been validated.
 
-Once the app archive is available, download both files from the same release. In the folder containing the downloads, verify the checksum before opening the archive:
+Download both files from the same release. In the folder containing the downloads, verify the checksum before opening the archive:
 
 ```sh
-shasum -a 256 Steve-macOS.zip
-cat Steve-macOS.zip.sha256
+shasum -a 256 -c Steve-macOS.zip.sha256
 ```
 
-The 64-character hashes must match. Extract the ZIP, then verify the app:
+The command must report `Steve-macOS.zip: OK`. Extract the ZIP, then verify the app:
 
 ```sh
 codesign --verify --deep --strict --verbose=2 Steve.app
