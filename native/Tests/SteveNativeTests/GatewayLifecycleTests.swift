@@ -70,12 +70,17 @@ private actor FixtureCodex: GatewayCodexClient {
     func setApprovalOrigin(_ value: String) { approvalOrigin = value }
     var approvalDecision: CodexApprovalDecision?
     func askApproval(mode: String = "url", duration: TimeInterval = 10, mismatch: Bool = false) { approvalMode = mode; approvalDuration = duration; mismatchApproval = mismatch }
+    var workerResumeError: String?
+    func failWorkerResume(_ message: String) { workerResumeError = message }
     var results: [String]
     init(_ results: [String]) { self.results = results }
     func hold() { holdWorker = true }
     func stop() { stops += 1 }
     func startThread(cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool, serviceTier: SteveServiceTier) -> String { startTiers.append((isRelay ? "relay:" : "worker:") + serviceTier.rawValue); return UUID().uuidString }
-    func resumeThread(threadID: String, cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool, serviceTier: SteveServiceTier) { resumeTiers.append((isRelay ? "relay:" : "worker:") + serviceTier.rawValue) }
+    func resumeThread(threadID: String, cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool, serviceTier: SteveServiceTier) throws {
+        resumeTiers.append((isRelay ? "relay:" : "worker:") + serviceTier.rawValue)
+        if !isRelay, let workerResumeError { throw RPCError(message: workerResumeError) }
+    }
     func compactThread(threadID: String) {}
     func interruptTurn(threadID: String, turnID: String) {}
     func runTurn(threadID: String, text: String, attachmentPaths: [String], workspace: String?, model: String, effort: String, serviceTier: SteveServiceTier, onTurnStarted: @escaping @Sendable (String) async -> Void) async throws -> CodexTurnResult {
@@ -373,6 +378,37 @@ final class GatewayLifecycleTests: XCTestCase {
         XCTAssertEqual(inputs.count, 2)
         XCTAssertTrue(inputs[1].hasPrefix("USER_REQUEST_FORMAT_CORRECTION:"))
         XCTAssertTrue(inputs[1].contains("USER_REQUEST:\n" + quote))
+    }
+    func testControlAfterUnusedWorkerResumeFailureReplacesOnlyWorker() async throws {
+        let control = #"{"schemaVersion":1,"kind":"relay_request","action":"control","control":{"operation":"schedule_list","userQuote":"List my schedules"}}"#
+        let (store, gateway, messages, codex) = try await setup([control, control], withAutomation: true)
+        await gateway.start(); await gateway.receive(inbound("first-control", text: "List my schedules"))
+        try await eventually { try await store.queueState("inbound:first-control") == "completed" }
+        let firstValue = try await store.agentSession(for: "chat")
+        let first = try XCTUnwrap(firstValue)
+        await codex.failWorkerResume("Codex App Server request failed (-32600): no rollout found")
+        await gateway.receive(inbound("second-control", text: "List my schedules"))
+        try await eventually { try await store.queueState("inbound:second-control") == "completed" }
+        let secondValue = try await store.agentSession(for: "chat")
+        let second = try XCTUnwrap(secondValue)
+        let starts = await codex.startTiers, turns = await codex.turns, sent = await messages.sent
+        XCTAssertNotEqual(first.threadID, second.threadID)
+        XCTAssertEqual(first.relayThreadID, second.relayThreadID)
+        XCTAssertEqual(starts.filter { $0.hasPrefix("worker:") }.count, 2)
+        XCTAssertEqual(starts.filter { $0.hasPrefix("relay:") }.count, 1)
+        XCTAssertEqual(turns, 2); XCTAssertEqual(sent.count, 2)
+        XCTAssertEqual(second.executionState, "idle")
+    }
+    func testUnknownWorkerResumeFailureDoesNotStartReplacementOrReplay() async throws {
+        let control = #"{"schemaVersion":1,"kind":"relay_request","action":"control","control":{"operation":"schedule_list","userQuote":"List my schedules"}}"#
+        let (store, gateway, _, codex) = try await setup([control], withAutomation: true)
+        await gateway.start(); await gateway.receive(inbound("original-control", text: "List my schedules"))
+        try await eventually { try await store.queueState("inbound:original-control") == "completed" }
+        await codex.failWorkerResume("Codex App Server request failed (-32600)")
+        await gateway.receive(inbound("unknown-resume", text: "List my schedules"))
+        try await eventually { try await store.queueState("inbound:unknown-resume") == "failed" }
+        let starts = await codex.startTiers, turns = await codex.turns
+        XCTAssertEqual(starts.count, 2); XCTAssertEqual(turns, 1)
     }
     func testSuccessfulScheduleControlDeliversCreatedIdentifierAndSettlesSession() async throws {
         let quote = "Remind me every Friday at 4 pm America/Chicago to review tasks and tell me its identifier"

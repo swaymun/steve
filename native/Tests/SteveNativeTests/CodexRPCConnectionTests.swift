@@ -359,6 +359,18 @@ final class CodexRPCConnectionTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 1)
     }
 
+    func testMissingRolloutClassificationSurvivesSanitizationWithoutServerDetails() {
+        let rpc = connection(#"""
+        read -r first
+        printf '%s\n' '{"id":1,"error":{"code":-32600,"message":"no rollout found for thread id private-thread https://private.invalid/?token=secret"}}'
+        """#)
+        defer { rpc.stop() }
+        XCTAssertThrowsError(try rpc.request(method: "thread/resume")) { error in
+            XCTAssertEqual(error.localizedDescription, "Codex App Server request failed (-32600): no rollout found")
+            XCTAssertTrue(CodexSessionRecovery.shouldReplaceResumedThread(for: error))
+        }
+    }
+
     func testEOFSettlesTurnWaiter() async throws {
         let rpc = connection(#"""
         read -r first

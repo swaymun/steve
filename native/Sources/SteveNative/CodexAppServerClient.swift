@@ -942,7 +942,7 @@ final class CodexRPCConnection: @unchecked Sendable {
                 let code = (error["code"] as? NSNumber)?.intValue ?? -1
                 // Server messages can include URLs or credentials; keep them out of logs/UI.
                 let message = (error["message"] as? String ?? "").lowercased()
-                let safeReason = ["already has an active writer", "expected ordinal", "thread not found", "context window exceeded"].first(where: message.contains)
+                let safeReason = ["already has an active writer", "expected ordinal", "thread not found", "no rollout found", "rollout not found", "context window exceeded"].first(where: message.contains)
                 waiter.resolve(.failure(RPCError(message: "Codex App Server request failed (\(code))" + (safeReason.map { ": " + $0 } ?? ""))))
             } else { waiter.resolve(.success(object["result"] ?? NSNull())) }
         } else if let method = object["method"] as? String {
