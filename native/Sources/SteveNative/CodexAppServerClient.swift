@@ -1,5 +1,7 @@
 import Foundation
+import CryptoKit
 import AppKit
+import ImageIO
 import Darwin
 import UniformTypeIdentifiers
 
@@ -26,6 +28,10 @@ struct CodexTurnAccumulator {
     private var completedAgentItemIDs = Set<String>()
     private var finalText = ""
     private var attachmentPaths: [String] = []
+    private var nativeCapturePaths: [String] = []
+    private var nativeCaptureItemIDs = Set<String>()
+    private var nativeCaptureBytes = 0
+    private var nativeCaptureRejected = false
 
     init(threadID: String, turnID: String, workspace: String? = nil) {
         self.threadID = threadID
@@ -50,6 +56,7 @@ struct CodexTurnAccumulator {
               let item = params["item"] as? [String: Any],
               let itemID = item["id"] as? String else { return nil }
 
+        collectNativeCaptures(in: item, itemID: itemID)
         attachmentPaths.append(contentsOf: attachmentPaths(in: item))
         let itemType = item["type"] as? String ?? "unknown"
         guard itemType == "agentMessage" else {
@@ -77,7 +84,46 @@ struct CodexTurnAccumulator {
             .joined()
         let text = finalText.isEmpty ? uncompletedDeltaText : finalText
         SteveLog.write("Codex turn final answer selected agentText=\(text.isEmpty ? 0 : 1) attachments=\(attachmentPaths.count)")
-        return CodexTurnResult(text: text, attachmentPaths: attachmentPaths, wasInterrupted: wasInterrupted, workspace: workspace)
+        return CodexTurnResult(text: text, attachmentPaths: attachmentPaths, wasInterrupted: wasInterrupted, workspace: workspace,
+                               nativeCapturePaths: nativeCaptureRejected || wasInterrupted ? [] : nativeCapturePaths)
+    }
+
+    private mutating func collectNativeCaptures(in item: [String: Any], itemID: String) {
+        guard !nativeCaptureRejected, let workspace,
+              item["type"] as? String == "mcpToolCall", item["server"] as? String == "cua_repl",
+              item["tool"] as? String == "js", item["status"] as? String == "completed",
+              item["error"] == nil || item["error"] is NSNull,
+              let result = item["result"] as? [String: Any], result["isError"] as? Bool != true,
+              let content = result["content"] as? [[String: Any]],
+              nativeCaptureItemIDs.insert(itemID).inserted else { return }
+        // Use only emitted image blocks, never arguments, text, paths or nested
+        // structured content. Array order is the tool's actual emission order.
+        for block in content where block["type"] as? String == "image" {
+            guard nativeCapturePaths.count < 32,
+                  let mime = block["mimeType"] as? String, ["image/png", "image/jpeg"].contains(mime),
+                  let encoded = block["data"] as? String, encoded.utf8.count <= 32 * 1024 * 1024,
+                  let data = Data(base64Encoded: encoded), !data.isEmpty, data.count <= 24 * 1024 * 1024,
+                  nativeCaptureBytes + data.count <= 64 * 1024 * 1024,
+                  let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) == 1,
+                  let type = CGImageSourceGetType(source) as String?, ["public.png", "public.jpeg"].contains(type),
+                  let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                  let width = properties[kCGImagePropertyPixelWidth] as? Int,
+                  let height = properties[kCGImagePropertyPixelHeight] as? Int,
+                  width > 0, height > 0, width <= 16_384, height <= 16_384, width * height <= 32_000_000,
+                  let decoded = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary),
+                  decoded.width == width, decoded.height == height,
+                  let path = CodexTurnResult.materializeDataURL("data:" + (type == "public.png" ? "image/png" : "image/jpeg") + ";base64," + encoded, workspace: workspace)
+            else {
+                // Never silently substitute an older screenshot when the final
+                // emitted capture could not be validated or stored.
+                nativeCaptureRejected = true
+                return
+            }
+            // CUA/App Server can re-encode a screenshot as JPEG while retaining
+            // image/png metadata. The decoded format owns the saved extension.
+            nativeCaptureBytes += data.count
+            nativeCapturePaths.append(path)
+        }
     }
 
     private func attachmentPaths(in item: [String: Any]) -> [String] {
@@ -155,9 +201,11 @@ struct CodexTurnAccumulator {
 struct CodexTurnResult: Sendable, Equatable {
     let text: String
     let attachments: [CodexAttachment]
+    let nativeCapturePaths: [String]
     let wasInterrupted: Bool
 
-    init(text: String, attachmentPaths: [String], wasInterrupted: Bool = false, workspace: String? = nil) {
+    init(text: String, attachmentPaths: [String], wasInterrupted: Bool = false, workspace: String? = nil, nativeCapturePaths: [String] = []) {
+        self.nativeCapturePaths = nativeCapturePaths
         // Structured envelopes are immutable protocol data, not presentation text.
         let isStructured = text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{")
         let extracted = isStructured ? (text: text, paths: [String]()) : Self.extractDataURLAttachments(from: text, workspace: workspace)
@@ -728,6 +776,9 @@ final class CodexRPCConnection: @unchecked Sendable {
     private var generation = UUID()
     private var terminalError: Error?
     private var notifications: [[String: Any]] = []
+    private var cancelledWaits: Set<String> = []
+    private var ownedThreads: Set<String> = []
+    private let filterUnownedEvents: Bool
     private var responseWaiters: [Int: CodexResponseWaiter] = [:]
     private var approvalHandler: CodexApprovalHandler?
     private var approvalTasks: [String: Task<Void, Never>] = [:]
@@ -738,12 +789,13 @@ final class CodexRPCConnection: @unchecked Sendable {
     private let eventTimeout: TimeInterval
     private let approvalTimeout: TimeInterval
 
-    init(executable: URL? = nil, arguments: [String] = [], responseTimeout: TimeInterval = 15, eventTimeout: TimeInterval = 1800, approvalTimeout: TimeInterval = 300) {
+    init(executable: URL? = nil, arguments: [String] = [], responseTimeout: TimeInterval = 15, eventTimeout: TimeInterval = 1800, approvalTimeout: TimeInterval = 300, filterUnownedEvents: Bool = false) {
         executableOverride = executable
         argumentsOverride = arguments
         self.responseTimeout = responseTimeout
         self.eventTimeout = eventTimeout
         self.approvalTimeout = approvalTimeout
+        self.filterUnownedEvents = filterUnownedEvents
     }
 
     var isRunning: Bool {
@@ -766,6 +818,7 @@ final class CodexRPCConnection: @unchecked Sendable {
             try Task.checkCancellation()
             if allowStart { try startIfNeeded() }
             else if process?.isRunning != true || terminalError != nil { throw RPCError(message: "Codex App Server is not running") }
+            if ["turn/start", "thread/compact/start"].contains(method), let threadID = params?["threadId"] as? String { ownedThreads.insert(threadID) }
             responseWaiters[id] = waiter
             var frame: [String: Any] = ["jsonrpc": "2.0", "id": id, "method": method]
             if let params { frame["params"] = params }
@@ -794,9 +847,11 @@ final class CodexRPCConnection: @unchecked Sendable {
     func waitForTurn(threadID: String, turnID: String, workspace: String? = nil) async throws -> CodexTurnResult {
         var accumulator = CodexTurnAccumulator(threadID: threadID, turnID: turnID, workspace: workspace)
         let deadline = Date().addingTimeInterval(eventTimeout)
+        let key = threadID + ":" + turnID
+        defer { clearCancelledWait(key) }
         while true {
             try Task.checkCancellation()
-            let object = try nextNotification(until: deadline) { object in
+            let object = try nextNotification(until: deadline, cancellationKey: key) { object in
                 guard let params = object["params"] as? [String: Any], params["threadId"] as? String == threadID else { return false }
                 if object["method"] as? String == "turn/completed" {
                     return (params["turn"] as? [String: Any])?["id"] as? String == turnID
@@ -822,9 +877,10 @@ final class CodexRPCConnection: @unchecked Sendable {
 
     func waitForCompaction(threadID: String) throws {
         let deadline = Date().addingTimeInterval(eventTimeout)
+        defer { clearCancelledWait(threadID + ":compact") }
         while true {
             try Task.checkCancellation()
-            let object = try nextNotification(until: deadline) { object in
+            let object = try nextNotification(until: deadline, cancellationKey: threadID + ":compact") { object in
                 (object["params"] as? [String: Any])?["threadId"] as? String == threadID
             }
             let method = object["method"] as? String
@@ -836,9 +892,21 @@ final class CodexRPCConnection: @unchecked Sendable {
         }
     }
 
-    private func nextNotification(until deadline: Date, matching predicate: ([String: Any]) -> Bool) throws -> [String: Any] {
+    func cancelWait(threadID: String, turnID: String) {
+        condition.lock(); defer { condition.unlock() }
+        cancelledWaits.insert(threadID + ":" + turnID)
+        condition.broadcast()
+    }
+
+    private func clearCancelledWait(_ key: String) {
+        condition.lock(); defer { condition.unlock() }
+        cancelledWaits.remove(key)
+    }
+
+    private func nextNotification(until deadline: Date, cancellationKey: String, matching predicate: ([String: Any]) -> Bool) throws -> [String: Any] {
         condition.lock(); defer { condition.unlock() }
         while true {
+            if cancelledWaits.contains(cancellationKey) { throw CancellationError() }
             if let index = notifications.firstIndex(where: predicate) { return notifications.remove(at: index) }
             if let terminalError { throw terminalError }
             guard process != nil else { throw RPCError(message: "Codex App Server is unavailable") }
@@ -942,7 +1010,7 @@ final class CodexRPCConnection: @unchecked Sendable {
                 let code = (error["code"] as? NSNumber)?.intValue ?? -1
                 // Server messages can include URLs or credentials; keep them out of logs/UI.
                 let message = (error["message"] as? String ?? "").lowercased()
-                let safeReason = ["already has an active writer", "expected ordinal", "thread not found", "no rollout found", "rollout not found", "context window exceeded"].first(where: message.contains)
+                let safeReason = ["already has an active writer", "expected ordinal", "thread not found", "no rollout found", "rollout not found", "context window exceeded", "is closing; retry thread/resume after the thread is closed"].first(where: message.contains)
                 waiter.resolve(.failure(RPCError(message: "Codex App Server request failed (\(code))" + (safeReason.map { ": " + $0 } ?? ""))))
             } else { waiter.resolve(.success(object["result"] ?? NSNull())) }
         } else if let method = object["method"] as? String {
@@ -950,6 +1018,9 @@ final class CodexRPCConnection: @unchecked Sendable {
             // otherwise grows without bound in a long-lived menu-bar process.
             let consumedMethods: Set<String> = ["item/agentMessage/delta", "item/completed", "turn/completed", "thread/compacted"]
             guard consumedMethods.contains(method) else { return }
+            if filterUnownedEvents {
+                guard let thread = (object["params"] as? [String: Any])?["threadId"] as? String, ownedThreads.contains(thread) else { return }
+            }
             guard notifications.count < 20_000 else { failLocked(RPCError(message: "Codex event buffer exceeded limit")); return }
             if method == "turn/completed", let params = object["params"] as? [String: Any],
                let turnID = (params["turn"] as? [String: Any])?["id"] as? String {
@@ -1052,9 +1123,9 @@ final class CodexRPCConnection: @unchecked Sendable {
         var environment = CodexComputerUseRuntime.sanitizedEnvironment(ProcessInfo.processInfo.environment)
         if executableOverride != nil { process.arguments = argumentsOverride }
         else if let computerUse = CodexComputerUseRuntime.discover() {
-            process.arguments = ["-c", "mcp_servers.computer-use=\(computerUse.serverConfiguration)", "app-server"]
+            process.arguments = ["-c", "thread_unload_delay_secs=0", "-c", "mcp_servers.computer-use=\(computerUse.serverConfiguration)", "app-server"]
             environment["CODEX_HOME"] = computerUse.codexHome
-        } else { process.arguments = ["app-server"] }
+        } else { process.arguments = ["-c", "thread_unload_delay_secs=0", "app-server"] }
         process.environment = environment
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
@@ -1068,6 +1139,8 @@ final class CodexRPCConnection: @unchecked Sendable {
         input = inputPipe.fileHandleForWriting
         terminalError = nil
         notifications.removeAll()
+        cancelledWaits.removeAll()
+        ownedThreads.removeAll()
         generation = UUID()
         let currentGeneration = generation
         DispatchQueue(label: "Steve.Codex.stdout").async { [weak self] in
@@ -1096,10 +1169,15 @@ actor CodexAppServerClient {
     private var lifecycle = UUID()
     private var requestInFlight = false
     private var requestWaiters: [CheckedContinuation<Void, Never>] = []
+    private var helperLineageSupported: Bool?
+    private var helperParents: Set<String> = []
+    private var threadConfigurations: [String: Data] = [:]
+    private static let restrictedFeatures = ["image_generation", "view_image", "apps", "plugins", "computer_use", "browser_use", "in_app_browser", "goals", "worktrees", "remote_plugin", "skill_mcp_dependency_install", "hooks"]
 
-    init(connection: CodexRPCConnection = CodexRPCConnection()) { self.connection = connection }
+    init(connection: CodexRPCConnection = CodexRPCConnection(filterUnownedEvents: true)) { self.connection = connection }
 
     func stop() {
+        threadConfigurations.removeAll()
         lifecycle = UUID()
         initializationTask?.cancel()
         initializationTask = nil
@@ -1197,11 +1275,13 @@ actor CodexAppServerClient {
 
     nonisolated static func relayToolOverrides(effectiveConfig: [String: Any]) -> [String: Any] {
         var overrides: [String: Any] = [
+            "agents.enabled": false,
             "features.shell_tool": false,
             "web_search": "disabled",
             "tools.web_search": false,
             "tools.view_image": false
         ]
+        for feature in restrictedFeatures { overrides["features." + feature] = false }
         for section in ["mcp_servers", "plugins", "apps"] {
             var disabled: [String: Any] = [:]
             for key in (effectiveConfig[section] as? [String: Any] ?? [:]).keys {
@@ -1224,7 +1304,6 @@ actor CodexAppServerClient {
         _ = try await request("thread/compact/start", params: ["threadId": threadID])
         let connection = self.connection
         let currentLifecycle = lifecycle
-        await acquireRequestSlot()
         do {
             try Task.checkCancellation()
             guard lifecycle == currentLifecycle else { throw CancellationError() }
@@ -1237,14 +1316,12 @@ actor CodexAppServerClient {
                     try await group.next()!
                 }
             }, onCancel: {
-                connection.stop()
+                connection.cancelWait(threadID: threadID, turnID: "compact")
             })
-            releaseRequestSlot()
             SteveLog.write("Codex thread compacted thread=\(threadID)")
         } catch {
-            releaseRequestSlot()
-            if lifecycle == currentLifecycle {
-                connection.stop()
+            if lifecycle == currentLifecycle && !connection.isRunning {
+                // Compaction cancellation does not own other threads.
                 initialized = false
             }
             throw error
@@ -1299,7 +1376,7 @@ actor CodexAppServerClient {
                 return try await group.next()!
             }
         }, onCancel: {
-            connection.stop()
+            // Keep unrelated task streams alive.
         })
         SteveLog.write("Codex turn interrupt requested thread=\(threadID) turn=\(turnID)")
     }
@@ -1326,7 +1403,7 @@ actor CodexAppServerClient {
                 return try await group.next()!
             }
         }, onCancel: {
-            connection.stop()
+            // Keep unrelated task streams alive.
         })
     }
 
@@ -1365,7 +1442,7 @@ actor CodexAppServerClient {
         let currentLifecycle = lifecycle
         let task = Task {
             _ = try await self.request("initialize", params: [
-                "clientInfo": ["name": "steve", "version": "0.1.2"],
+                "clientInfo": ["name": "steve", "version": "0.1.3"],
                 "capabilities": ["experimentalApi": true]
             ])
             try Task.checkCancellation()
@@ -1389,7 +1466,46 @@ actor CodexAppServerClient {
 
     private func threadRequest(method: String, params: [String: Any]) async throws -> [String: Any] {
         try await ensureInitialized()
-        return try await requestObject(method, params: params)
+        var configuration = params
+        configuration.removeValue(forKey: "threadId")
+        let fingerprint = try JSONSerialization.data(withJSONObject: configuration, options: [.sortedKeys])
+        if method == "thread/resume", let id = params["threadId"] as? String, threadConfigurations[id] != fingerprint {
+            try await unloadIdleThread(id)
+        }
+        let deadline = Date().addingTimeInterval(5)
+        var response: [String: Any]
+        while true {
+            do { response = try await requestObject(method, params: params); break }
+            catch {
+                // The loaded list can drop the ID just before the old writer
+                // finishes shutdown. Only this explicit pre-resume condition
+                // is retryable; a turn or ambiguous execution is never retried.
+                guard method == "thread/resume", Date() < deadline,
+                      error.localizedDescription.contains("is closing; retry thread/resume after the thread is closed") else { throw error }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+        }
+        if let sandbox = params["sandbox"] as? String { try Self.verifySandbox(response, requested: sandbox) }
+        if let id = (response["thread"] as? [String: Any])?["id"] as? String { threadConfigurations[id] = fingerprint }
+        return response
+    }
+
+    private func unloadIdleThread(_ id: String) async throws {
+        func isLoaded() async throws -> Bool {
+            let response = try await requestObject("thread/loaded/list", params: [:])
+            guard let ids = response["data"] as? [String] else { throw RPCError(message: "Cannot verify task configuration") }
+            return ids.contains(id)
+        }
+        guard try await isLoaded() else { return }
+        let response = try await requestObject("thread/read", params: ["threadId": id, "includeTurns": true])
+        guard let thread = response["thread"] as? [String: Any], let turns = thread["turns"] as? [[String: Any]],
+              !turns.contains(where: { $0["status"] as? String == "inProgress" }) else { throw RPCError(message: "Cannot change configuration while this task is active") }
+        _ = try await request("thread/unsubscribe", params: ["threadId": id])
+        let deadline = Date().addingTimeInterval(5)
+        while try await isLoaded() {
+            guard Date() < deadline else { throw RPCError(message: "Codex has not released the task for configuration changes") }
+            try await Task.sleep(for: .milliseconds(50))
+        }
     }
 
     func threadParams(cwd: String, permissionProfile: String, model: String, developerInstructions: String, threadID: String? = nil, toolOverrides: [String: Any] = [:], serviceTier: SteveServiceTier = .standard) throws -> [String: Any] {
@@ -1425,6 +1541,13 @@ actor CodexAppServerClient {
             throw RPCError(message: "Codex did not confirm the requested service tier; the task was not started.")
         }
         SteveLog.write("Codex service tier confirmed requested=\(requested.rawValue) resolved=\(actual)")
+    }
+
+    nonisolated static func verifySandbox(_ response: [String: Any], requested: String) throws {
+        let expected = ["read-only": "readOnly", "workspace-write": "workspaceWrite", "danger-full-access": "dangerFullAccess"][requested]
+        guard let expected, (response["sandbox"] as? [String: Any])?["type"] as? String == expected else {
+            throw RPCError(message: "Codex did not confirm the requested access boundary; the task was not started.")
+        }
     }
 
     private func permissionContext(_ profile: String) throws -> (String, String) {
@@ -1463,14 +1586,14 @@ actor CodexAppServerClient {
                     return try await group.next()!
                 }
             }, onCancel: {
-                connection.stop()
+                // A cancelled caller does not own the shared connection.
             })
             releaseRequestSlot()
             return value
         } catch {
             releaseRequestSlot()
-            if lifecycle == currentLifecycle {
-                connection.stop()
+            if lifecycle == currentLifecycle && !connection.isRunning {
+                // A cancelled caller does not own the shared connection.
                 initialized = false
             }
             throw error
@@ -1484,7 +1607,6 @@ actor CodexAppServerClient {
     ) async throws -> CodexTurnResult {
         let connection = self.connection
         let currentLifecycle = lifecycle
-        await acquireRequestSlot()
         do {
             try Task.checkCancellation()
             guard lifecycle == currentLifecycle else { throw CancellationError() }
@@ -1501,16 +1623,14 @@ actor CodexAppServerClient {
                     return try await group.next()!
                 }
             }, onCancel: {
-                connection.stop()
+                // Interrupt only this turn. The shared reader continues routing
+                // responses and notifications for other operators and the relay.
+                connection.cancelWait(threadID: threadID, turnID: turnID)
+                Task.detached { _ = try? connection.requestWhileStreaming(method: "turn/interrupt", params: ["threadId": threadID, "turnId": turnID]) }
             })
-            releaseRequestSlot()
             return value
         } catch {
-            releaseRequestSlot()
-            if lifecycle == currentLifecycle {
-                connection.stop()
-                initialized = false
-            }
+            if lifecycle == currentLifecycle && !connection.isRunning { initialized = false }
             throw error
         }
     }
@@ -1553,4 +1673,151 @@ private struct RawUsage: Decodable {
     }
 
     private enum CodingKeys: String, CodingKey { case rateLimits, primary, secondary }
+}
+
+extension CodexAppServerClient {
+    func nativeHelperAvailability() -> Bool? { helperLineageSupported }
+
+    func relayProfile(settings: Settings) async throws -> AgentModelProfile {
+        let catalog = try await listModels()
+        let requested = settings.relayModel ?? "gpt-5.6-luna"
+        if let model = catalog.first(where: { $0.id == requested || $0.model == requested }),
+           model.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == settings.relayEffort }) {
+            return .init(model: model.id, effort: settings.relayEffort, serviceTier: settings.relayServiceTier)
+        }
+        guard settings.relayModel == nil else { throw RPCError(message: "The selected relay model or reasoning effort is unavailable in Codex.") }
+        return .init(model: settings.model, effort: settings.effort, serviceTier: settings.relayServiceTier)
+    }
+
+    func operatorThread(threadID: String?, cwd: String, permissionProfile: String, profile: AgentModelProfile, instructions: String, mode: OperatorMode, maxHelpers: Int) async throws -> String {
+        try await ensureInitialized()
+        let response = try await requestObject("config/read", params: ["cwd": cwd, "includeLayers": false])
+        guard let effective = response["config"] as? [String: Any] else { throw RPCError(message: "Cannot verify operator tool configuration") }
+        var overrides: [String: Any] = ["agents.enabled": false]
+        if mode == .background {
+            overrides = Self.relayToolOverrides(effectiveConfig: effective)
+            overrides["features.shell_tool"] = false
+            overrides["web_search"] = "live"
+            overrides["tools.web_search"] = true
+            if maxHelpers > 0, await supportsHelperLineage() {
+                let path = try researchHelperConfiguration(effectiveConfig: effective, profile: profile)
+                overrides["agents.enabled"] = true
+                overrides["agents.max_concurrent_threads_per_session"] = maxHelpers
+                overrides["agents.max_depth"] = 1
+                overrides["agents.default_subagent_model"] = profile.model
+                overrides["agents.default_subagent_reasoning_effort"] = profile.effort
+                var roles = effective["agents"] as? [String: Any] ?? [:]
+                for key in ["default", "worker", "explorer", "steve_research"] { roles[key] = [:] }
+                // Restrict every advertised configured role, including custom
+                // roles, so choosing another name cannot recover GUI tools.
+                for (name, value) in roles where value is [String: Any] {
+                    var role = (value as? [String: Any]) ?? [:]
+                    role["config_file"] = path
+                    role["description"] = "Bounded read-only research; no desktop, integrations, writes, or further delegation."
+                    overrides["agents.\(name)"] = role
+                }
+            }
+        }
+        var params = try threadParams(cwd: cwd, permissionProfile: mode == .background ? "read-only" : permissionProfile,
+                                      model: profile.model, developerInstructions: instructions, threadID: threadID,
+                                      toolOverrides: overrides, serviceTier: profile.serviceTier)
+        if threadID == nil { params.removeValue(forKey: "threadId") }
+        let result = try await threadRequest(method: threadID == nil ? "thread/start" : "thread/resume", params: params)
+        try Self.verifyServiceTier(result, requested: profile.serviceTier)
+        guard let id = (result["thread"] as? [String: Any])?["id"] as? String else { throw RPCError(message: "Codex did not return an operator thread") }
+        if overrides["agents.enabled"] as? Bool == true { helperParents.insert(id) }
+        return id
+    }
+
+    private func supportsHelperLineage() async -> Bool {
+        if let helperLineageSupported { return helperLineageSupported }
+        do {
+            let result = try await requestObject("thread/list", params: ["ancestorThreadId": UUID().uuidString.lowercased(), "limit": 1, "sourceKinds": ["subAgentThreadSpawn"]])
+            guard let data = result["data"] as? [[String: Any]], data.isEmpty else { throw RPCError(message: "Codex does not support isolated helper lineage") }
+            helperLineageSupported = true
+        } catch {
+            helperLineageSupported = false
+            SteveLog.write("Native research helpers unavailable; operators will work independently")
+        }
+        return helperLineageSupported == true
+    }
+
+    private func researchHelperConfiguration(effectiveConfig: [String: Any], profile: AgentModelProfile) throws -> String {
+        func quoted(_ value: String) -> String { String(data: try! JSONEncoder().encode(value), encoding: .utf8)! }
+        var text = """
+        name = "steve_research"
+        description = "Bounded read-only research helper"
+        developer_instructions = "Complete only your assigned research or analysis, return sources and uncertainty to your operator, and stop. Never operate apps, send messages, change files or accounts, or delegate further."
+        sandbox_mode = "read-only"
+        service_tier = \(quoted(profile.serviceTier.wireValue))
+        web_search = "live"
+        [agents]
+        enabled = false
+        [features]
+        shell_tool = false
+        """
+        for feature in Self.restrictedFeatures { text += "\n\(feature) = false" }
+        text += "\n[apps._default]\nenabled = false\n"
+        for section in ["mcp_servers", "plugins", "apps"] {
+            var keys = Set((effectiveConfig[section] as? [String: Any] ?? [:]).keys)
+            if section == "mcp_servers" { keys.insert("computer-use") }
+            for name in keys.sorted() where !(section == "apps" && name == "_default") {
+                text += "\n[\(section).\(quoted(name))]\nenabled = false\n"
+            }
+        }
+        let directory = StevePaths.dataDirectory.appendingPathComponent("helper-profiles", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        // Each operator gets an immutable config; a later settings change cannot
+        // widen a helper that is about to spawn in an existing task.
+        let digest = SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+        let path = directory.appendingPathComponent(digest + ".toml")
+        try Data(text.utf8).write(to: path, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+        return path.path
+    }
+
+    func stopDescendants(threadID: String) async throws {
+        guard helperParents.contains(threadID) else { return }
+        var cursor: String?
+        var descendants: [[String: Any]] = []
+        repeat {
+            var params: [String: Any] = ["ancestorThreadId": threadID, "limit": 100, "sourceKinds": ["subAgent", "subAgentThreadSpawn", "subAgentOther"]]
+            if let cursor { params["cursor"] = cursor }
+            let result = try await requestObject("thread/list", params: params)
+            guard let data = result["data"] as? [[String: Any]] else { throw RPCError(message: "Cannot verify helper lineage") }
+            descendants += data
+            cursor = result["nextCursor"] as? String
+        } while cursor != nil
+        var lineage = Set([threadID])
+        var remaining = descendants
+        while !remaining.isEmpty {
+            let matched = remaining.filter { thread in
+                let spawn = ((thread["source"] as? [String: Any])?["subAgent"] as? [String: Any])?["thread_spawn"] as? [String: Any]
+                return (thread["parentThreadId"] as? String ?? spawn?["parent_thread_id"] as? String).map { lineage.contains($0) } == true
+            }
+            guard !matched.isEmpty else { throw RPCError(message: "Codex returned an unrelated helper; stopping it was refused") }
+            lineage.formUnion(matched.compactMap { $0["id"] as? String })
+            remaining.removeAll { ($0["id"] as? String).map { lineage.contains($0) } == true }
+        }
+        for id in lineage.subtracting([threadID]) {
+            try await quiesceThread(threadID: id)
+            _ = try await request("thread/archive", params: ["threadId": id])
+        }
+    }
+
+    func quiesceThread(threadID: String) async throws {
+        let deadline = Date().addingTimeInterval(15)
+        repeat {
+            let result = try await requestObject("thread/read", params: ["threadId": threadID, "includeTurns": true])
+            guard let thread = result["thread"] as? [String: Any], let turns = thread["turns"] as? [[String: Any]] else { throw RPCError(message: "Cannot verify task stop") }
+            let active = turns.filter { $0["status"] as? String == "inProgress" }
+            if active.isEmpty { return }
+            for turn in active {
+                guard let id = turn["id"] as? String else { throw RPCError(message: "Cannot identify active task turn") }
+                try await interruptTurn(threadID: threadID, turnID: id)
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        } while Date() < deadline
+        throw RPCError(message: "Codex did not confirm that the task stopped")
+    }
 }

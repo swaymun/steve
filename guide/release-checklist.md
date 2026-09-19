@@ -8,6 +8,9 @@ This is an acceptance checklist, not a claim of completed validation.
 - The installed app sends and receives only through an explicitly authorized paired private conversation.
 - Stop, resume, revocation, app restart, watcher recovery, uncertain execution, and partial delivery are exercised on the installed Mac build.
 - Browser work uses the actual installed Computer Use capability. Relay tool restrictions are inspected live; configuration flags alone do not prove universal tool isolation.
+- Independent operators overlap while only one owns the visible Mac. Corrections, named cancellation, queued fresh context, and background-to-computer handoff preserve the intended task and its result.
+- Relay and operator model settings are verified independently. A settings change does not silently change an already running turn.
+- A requested screenshot selects a fresh native capture from the current task turn and arrives as a readable iMessage attachment. Unselected captures are not sent.
 - Phone takeover is tested in iPhone Safari against the actual Mac session: login, pause, disconnect, expiry, revocation, and explicit resume with fresh inspection.
 - Persistent preference and schedule operations have durable outcomes, timezone/restart tests, and real message delivery acceptance.
 - Link setup and test-mode payment flows are verified without a real charge. Real purchases require separate exact authorization and receipt evidence.

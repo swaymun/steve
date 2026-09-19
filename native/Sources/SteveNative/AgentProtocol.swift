@@ -5,10 +5,13 @@ import Foundation
 /// malformed model response fail closed instead of becoming user-facing prose.
 enum AgentProtocol {
     static let schemaVersion = 1
+    static let lastNativeCapture = "steve-capture:last"
 }
 
 enum RelayAction: String, Codable, Sendable {
     case execute
+    case reply
+    case cancel
     case clarify
     case refuse
     case control
@@ -28,8 +31,11 @@ struct RelayRequestEnvelope: Codable, Equatable, Sendable {
     let userMessage: String?
     let workerContextAction: WorkerContextAction?
     let control: RelayUserControl?
+    let taskID: String?
+    let taskTitle: String?
+    let mode: OperatorMode?
 
-    init(action: RelayAction, workerPrompt: String? = nil, userMessage: String? = nil, workerContextAction: WorkerContextAction? = nil, control: RelayUserControl? = nil) {
+    init(action: RelayAction, workerPrompt: String? = nil, userMessage: String? = nil, workerContextAction: WorkerContextAction? = nil, control: RelayUserControl? = nil, taskID: String? = nil, taskTitle: String? = nil, mode: OperatorMode? = nil) {
         schemaVersion = AgentProtocol.schemaVersion
         kind = "relay_request"
         self.action = action
@@ -37,6 +43,9 @@ struct RelayRequestEnvelope: Codable, Equatable, Sendable {
         self.userMessage = userMessage
         self.workerContextAction = workerContextAction
         self.control = control
+        self.taskID = taskID
+        self.taskTitle = taskTitle
+        self.mode = mode
     }
 
     func validate() throws {
@@ -45,6 +54,8 @@ struct RelayRequestEnvelope: Codable, Equatable, Sendable {
         }
         guard kind == "relay_request" else { throw AgentEnvelopeError.invalidKind(kind) }
         switch action {
+        case .cancel:
+            guard let taskID, !taskID.isEmpty, workerPrompt == nil, control == nil else { throw AgentEnvelopeError.invalidPayload("cancel requires an existing taskID and no work or control") }
         case .control:
             guard let control, workerPrompt == nil else { throw AgentEnvelopeError.invalidPayload("control requires a typed control and no workerPrompt") }
             try control.validate()
@@ -52,10 +63,18 @@ struct RelayRequestEnvelope: Codable, Equatable, Sendable {
             guard let workerPrompt, !workerPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw AgentEnvelopeError.invalidPayload("execute requires workerPrompt")
             }
-        case .clarify, .refuse:
+        case .reply, .clarify, .refuse:
             guard let userMessage, !userMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw AgentEnvelopeError.invalidPayload("clarify and refuse require userMessage")
+                throw AgentEnvelopeError.invalidPayload("reply, clarify and refuse require userMessage")
             }
+            guard workerPrompt == nil, control == nil else { throw AgentEnvelopeError.invalidPayload("direct replies cannot also request execution") }
+        }
+    }
+
+    func validateTaskRouting() throws {
+        guard action == .execute, taskID == nil else { return }
+        guard mode != nil, let taskTitle, !taskTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AgentEnvelopeError.invalidPayload("A new task requires its execution mode and a short taskTitle")
         }
     }
 }
@@ -65,6 +84,7 @@ enum WorkerStatus: String, Codable, Sendable {
     case needsClarification = "needs_clarification"
     case blocked
     case failed
+    case needsComputer = "needs_computer"
 }
 
 struct WorkerArtifactEnvelope: Codable, Equatable, Sendable {
@@ -91,8 +111,8 @@ struct WorkerResultEnvelope: Codable, Equatable, Sendable {
             throw AgentEnvelopeError.invalidPayload("worker result requires summary")
         }
         guard Set(artifacts.map(\.id)).count == artifacts.count,
-              artifacts.allSatisfy({ !$0.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.path.hasPrefix("/") }) else {
-            throw AgentEnvelopeError.invalidPayload("artifacts require unique nonempty IDs and absolute paths")
+              artifacts.allSatisfy({ !$0.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && ($0.path.hasPrefix("/") || $0.path == AgentProtocol.lastNativeCapture) }) else {
+            throw AgentEnvelopeError.invalidPayload("artifacts require unique nonempty IDs and an absolute path or the final native capture")
         }
         if status == .needsClarification && (userQuestion?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) {
             throw AgentEnvelopeError.invalidPayload("needs_clarification requires userQuestion")

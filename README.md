@@ -4,9 +4,12 @@
 
 Steve runs on your Mac, uses your existing Codex login and browser session, and sends results back through iMessage. No OpenAI API key or iPhone app is required. Ask it to research the web, operate apps, manage reminders, check connected services, or send back files and recordings.
 
-<img src="guide/images/messages-reminder.png" alt="A real Messages exchange: asking Steve to remind you to stretch, receiving a confirmation in EDT, then cancelling the reminder." width="800">
+<p>
+  <img src="guide/images/imessage-trip.png" alt="Recreated iMessage exchange: Steve plans a car-free Boston weekend, incorporates vegetarian dinners and a free Saturday morning, then delivers the itinerary file." width="350">
+  <img src="guide/images/imessage-shopping.png" alt="Recreated iMessage exchange: Steve compares REI bottles, adds one to the cart, stops before entering personal details or ordering, and delivers the actual checkout screenshot." width="350">
+</p>
 
-A real reminder conversation, captured at native resolution. The reminder was cancelled after the demo.
+Recreated from real Mac Mini task exchanges on September 19, 2026; messages and file labels are shortened. The itinerary file and checkout screenshot were delivered through iMessage. The hotel rate shown is before tax; the checkout total can change with shipping and tax. Nothing was booked or purchased.
 
 ## What you can ask Steve
 
@@ -25,22 +28,9 @@ iPhone → iMessage → Steve on your Mac → Codex → apps and websites
        ← results, files, and recordings ←
 ```
 
-**Development preview:** iMessage tasks, browser research, reminders, email reads, and video delivery have been exercised on a Mac. Phone login, iPhone video playback, and calendar support have [remaining limitations](guide/preview-limitations.md). MIT licensed.
+**Development preview:** iMessage tasks, browser research, reminders, email reads, and video delivery have been exercised on a Mac. Phone login, iPhone video playback, and account integration coverage have [remaining limitations](guide/preview-limitations.md). MIT licensed.
 
-<details>
-<summary><strong>See real tasks: restaurant research and a recorded document</strong></summary>
 
-**Check dinner availability.** Steve checked restaurant menus and live booking pages for two people in Austin, including vegetarian options and outdoor seating. This original browser capture shows the date, party size, and available times observed on September 19, 2026. No reservation was submitted; availability can change.
-
-<img src="guide/images/restaurant-availability.jpg" alt="Steve's original browser capture of True Food Kitchen in Austin: two people, September 25, 2026, with available dinner times including 7 PM and 7:30 PM." width="800">
-
-**Create a file and send a recording.** Steve saved a four-line Weekend plan in TextEdit and delivered the file and a document-only video through iMessage. This frame shows the finished note with “Ready for review” selected. It shows the final state, not the editing or window-closing sequence.
-
-<img src="guide/images/weekend-plan-upscaled.png" alt="AI-upscaled frame from Steve's delivered recording: Weekend plan.txt in TextEdit, with Buy groceries, Go for a walk, Read a book, and Ready for review on four lines. The final line is selected." width="600">
-
-AI-upscaled for readability; [view the original video frame](guide/images/weekend-plan-original.png). The original recording was decoded and checked on a Mac; physical iPhone playback remains unverified.
-
-</details>
 
 **Requires:** an Apple silicon Mac with macOS 14+, Codex, and a **separate Messages account on the Mac running Steve**. Computer Use has its own availability and macOS requirements; see [setup](guide/setup.md). Same-account self-messaging is outside this setup flow.
 
@@ -66,7 +56,7 @@ The commands use the running app's local CLI. A web chat without local Mac tools
 
 ## Install manually
 
-[Download v0.1.2 for Apple silicon](https://github.com/swaymun/steve/releases/download/v0.1.2/Steve-macOS.zip) · [SHA-256 checksum](https://github.com/swaymun/steve/releases/download/v0.1.2/Steve-macOS.zip.sha256) · [Release notes](https://github.com/swaymun/steve/releases/tag/v0.1.2)
+[Download v0.1.3 for Apple silicon](https://github.com/swaymun/steve/releases/download/v0.1.3/Steve-macOS.zip) · [SHA-256 checksum](https://github.com/swaymun/steve/releases/download/v0.1.3/Steve-macOS.zip.sha256) · [Release notes](https://github.com/swaymun/steve/releases/tag/v0.1.3)
 
 Use macOS 14 or later with Codex installed and signed in. The prebuilt app is Developer ID signed and notarized by Apple; no source build is needed. Native Computer Use has its own availability and macOS requirements. The Mac must remain awake, signed in, and running Steve.
 
@@ -95,11 +85,13 @@ Messages content and relevant task context are sent to Codex to process requests
 
 ## How Steve works
 
-Steve is a native SwiftUI menu-bar app. A persistent relay interprets messages and formats verified results; a persistent worker performs tasks through the installed Codex App Server. Context can be reused or compacted. Codex owns authentication; Steve stores no ChatGPT tokens and needs no OpenAI API key.
+Steve is a native SwiftUI menu-bar app. One persistent relay keeps the conversation; each independent task has an operator that owns its context and result through the installed Codex App Server. The relay defaults to Luna Low Standard. Operator models and service tiers are [configured separately](guide/setup.md#relay-and-operator-settings).
+
+By default, two operators can work at once. Public research can use one restricted native helper per operator. Only one operator controls the visible Mac and browser at a time. Say “Also…” to start another goal, correct a task in ordinary language, or ask Steve to cancel a named task. Context can be reused or compacted. Codex owns authentication; Steve stores no ChatGPT tokens and needs no OpenAI API key.
 
 Native Computer Use operates the visible browser and apps. Steve reads the local Messages database and sends replies through public AppleScript. Queues, saved preferences, reminders, and task state persist across restarts. Ambiguous executions or sends need review and are never automatically replayed.
 
-One exact private conversation is paired with a short-lived code. Other chats, groups, and mismatched senders cannot operate Steve. Use ordinary language for tasks. Say **status** to inspect work, **/stop** to pause, or **resume** to accept work again. Old failures are labeled separately as History.
+One exact private conversation is paired with a short-lived code. Other chats, groups, and mismatched senders cannot operate Steve. Use ordinary language for tasks. Say **status** to inspect work, **/stop** to cancel active and queued requests and pause, or **resume** to accept work again. Old failures are labeled separately as History.
 
 Optional [phone control](guide/setup.md#phone-control-in-safari) shows the Mac's current browser session in Safari through private Tailscale Serve. Tailscale is required on both devices for this feature; basic messaging and Computer Use do not need it.
 
@@ -113,6 +105,6 @@ swift build --package-path native --configuration release
 ./scripts/build-native.sh
 ```
 
-Tests use fixtures and never send live iMessages. Live acceptance runs require an explicitly authorized conversation. Raw histories, local settings, diagnostic logs, and development artifacts must stay out of public commits. Publish only screenshots reviewed for public disclosure, such as the demo above.
+Tests use fixtures and never send live iMessages. Live acceptance runs require an explicitly authorized conversation. Raw histories, local settings, diagnostic logs, and development artifacts must stay out of public commits. Publish only screenshots reviewed for public disclosure, such as the demos above.
 
 See [third-party notices](THIRD_PARTY_NOTICES.md) and [the release checklist](guide/release-checklist.md).

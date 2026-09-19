@@ -6,7 +6,7 @@ Use the tested account arrangement: Messages on Steve's Mac is signed in to a se
 
 ## Install a release
 
-The [v0.1.2 development preview](https://github.com/swaymun/steve/releases/tag/v0.1.2) contains a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Native Computer Use has separate availability and macOS requirements; inspect its installed app and supported Codex setup flow. Intel builds have not been validated.
+The [v0.1.3 development preview](https://github.com/swaymun/steve/releases/tag/v0.1.3) contains a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Native Computer Use has separate availability and macOS requirements; inspect its installed app and supported Codex setup flow. Intel builds have not been validated.
 
 ### Discover the right download
 
@@ -14,7 +14,7 @@ Steve is currently distributed as a GitHub prerelease. Use the [published releas
 
 An agent should inspect published, non-draft releases in descending version order and choose the newest compatible one. Check the Mac's architecture and macOS version against the release notes, and require both `Steve-macOS.zip` and `Steve-macOS.zip.sha256` in that same release. GitHub's automatic source ZIP/tar archives are not the app. If no compatible app exists, explain the source-build option rather than claiming there is no release.
 
-For this version: [download the app ZIP](https://github.com/swaymun/steve/releases/download/v0.1.2/Steve-macOS.zip) and [its checksum](https://github.com/swaymun/steve/releases/download/v0.1.2/Steve-macOS.zip.sha256). In the download folder:
+For this version: [download the app ZIP](https://github.com/swaymun/steve/releases/download/v0.1.3/Steve-macOS.zip) and [its checksum](https://github.com/swaymun/steve/releases/download/v0.1.3/Steve-macOS.zip.sha256). In the download folder:
 
 ```sh
 shasum -a 256 -c Steve-macOS.zip.sha256
@@ -128,7 +128,25 @@ See the [permissions and privacy table](../README.md#permissions-and-privacy). P
 
 Use normal messages for tasks and “yes”/“no” for a pending decision. Internal approval IDs are available in the CLI for diagnostics, but are not needed in ordinary messages. A status reply describes current work first, with prior failures labeled History. Unconfirmed outcomes need review and are not automatically rerun.
 
-`steve stop` pauses/cancels; `steve start` resumes. In iMessage, say “stop” or “resume.” These do not quit or relaunch the app; use its Quit action to shut down cleanly.
+`steve stop` cancels active and queued requests and pauses Steve; `steve start` accepts new work again. In iMessage, say “stop” or “resume.” These do not quit or relaunch the app; use its Quit action to shut down cleanly.
+
+## Relay and operator settings
+
+The relay keeps the iMessage conversation and routes work. Its default is **Luna, Low, Standard** when that model is available in the signed-in Codex account. Operators do the work using their separate model, reasoning, and service-tier settings. If the automatic relay model is unavailable, Steve uses the selected operator model and effort; an explicitly selected unavailable relay model fails clearly.
+
+Change these independently in Steve's menu-bar settings or through the installed CLI:
+
+```sh
+steve setup --relay-model gpt-5.6-luna --relay-effort low --relay-service-tier standard --json
+steve setup --model gpt-5.6-luna --effort xhigh --service-tier fast --json
+steve setup --max-operators 2 --max-helpers 1 --json
+```
+
+Use `--relay-model auto` to restore automatic selection. The model and effort must be supported by the current account. Standard is the default service tier; Fast consumes more Codex usage. Changing agent settings applies to future turns and preserves pairing, permissions, schedules, and work already running.
+
+Steve defaults to two active operators (configurable from one to four) and one native research helper per background operator (zero to two). Helpers have one level of delegation and only public web research tools. When the installed App Server cannot support helper lineage, the operator works alone. Computer tasks run one at a time; other research can continue. Helpers are disabled while an operator owns the Mac.
+
+Ask naturally: “Also compare the train options,” “For the hotel search, keep it under $200,” or “Cancel the hotel search.” Steve keeps unrelated goals separate, routes corrections to their owner, and asks which task only when the reference is ambiguous. `/stop` cancels active and queued requests and pauses scheduled execution. It does not delete schedules. Resuming does not restart cancelled requests. An uncertain action is never automatically repeated after a crash or interruption.
 
 ## Build from source
 

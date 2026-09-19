@@ -37,6 +37,11 @@ struct Settings: Codable, Sendable {
     var burstWindowMs: UInt64 = 1500
     var timezone: String = "UTC"
     var serviceTier: SteveServiceTier = .standard
+    var relayModel: String?
+    var relayEffort: String = "low"
+    var relayServiceTier: SteveServiceTier = .standard
+    var maxConcurrentOperators: Int = 2
+    var maxHelpersPerOperator: Int = 1
 }
 enum SteveServiceTier: String, Codable, CaseIterable, Sendable {
     case standard, fast
@@ -57,6 +62,17 @@ extension Settings {
         burstWindowMs = try c.decodeIfPresent(UInt64.self, forKey: .burstWindowMs) ?? 1500
         timezone = try c.decodeIfPresent(String.self, forKey: .timezone) ?? "UTC"
         serviceTier = try c.decodeIfPresent(SteveServiceTier.self, forKey: .serviceTier) ?? .standard
+        relayModel = try c.decodeIfPresent(String.self, forKey: .relayModel)
+        relayEffort = try c.decodeIfPresent(String.self, forKey: .relayEffort) ?? "low"
+        relayServiceTier = try c.decodeIfPresent(SteveServiceTier.self, forKey: .relayServiceTier) ?? .standard
+        maxConcurrentOperators = try c.decodeIfPresent(Int.self, forKey: .maxConcurrentOperators) ?? 2
+        maxHelpersPerOperator = try c.decodeIfPresent(Int.self, forKey: .maxHelpersPerOperator) ?? 1
+        guard (1...4).contains(maxConcurrentOperators) else {
+            throw DecodingError.dataCorruptedError(forKey: .maxConcurrentOperators, in: c, debugDescription: "Maximum concurrent operators must be from 1 through 4.")
+        }
+        guard (0...2).contains(maxHelpersPerOperator) else {
+            throw DecodingError.dataCorruptedError(forKey: .maxHelpersPerOperator, in: c, debugDescription: "Maximum helpers per operator must be from 0 through 2.")
+        }
     }
 }
 struct Status: Codable, Sendable { let state: String; let detail: String; let connected: Bool }
@@ -82,7 +98,7 @@ struct PairingChallenge: Codable, Sendable {
         messageURI = try container.decodeIfPresent(String.self, forKey: .messageURI) ?? ""
     }
 }
-struct Snapshot: Codable, Sendable { let status: Status; let settings: Settings; let paused: Bool; let dependencies: [Dependency]; let transportMode: String; let account: AccountSnapshot?; let models: [ModelEntry]; let permissions: [PermissionProfile]; let usage: Usage?; let trustedConversation: TrustedConversation?; let pairing: PairingChallenge? }
+struct Snapshot: Codable, Sendable { let status: Status; let settings: Settings; let paused: Bool; let dependencies: [Dependency]; let transportMode: String; let account: AccountSnapshot?; let models: [ModelEntry]; let permissions: [PermissionProfile]; let usage: Usage?; let trustedConversation: TrustedConversation?; let pairing: PairingChallenge?; var tasks: [OperatorTaskSummary] = []; var nativeHelpersAvailable: Bool? = nil }
 struct Dependency: Codable, Sendable { let name: String; let available: Bool; let detail: String }
 struct UsageRow: Identifiable, Sendable { let id: String; let title: String; let subtitle: String }
 struct LoginSnapshot: Codable, Sendable { let loginID: String?; let authURL: String?; enum CodingKeys: String, CodingKey { case loginID = "loginId"; case authURL = "authUrl" } }
@@ -221,6 +237,11 @@ final class SteveModel: ObservableObject {
     func selectModel(_ value: String) { run { try await $0.selectModel(value) } }
     func selectServiceTier(_ value: SteveServiceTier) { run { try await $0.selectServiceTier(value.rawValue) } }
     func selectEffort(_ value: String) { run { try await $0.selectEffort(value) } }
+    func selectRelayModel(_ value: String) { run { try await $0.selectRelayModel(value) } }
+    func selectRelayServiceTier(_ value: SteveServiceTier) { run { try await $0.selectRelayServiceTier(value.rawValue) } }
+    func selectRelayEffort(_ value: String) { run { try await $0.selectRelayEffort(value) } }
+    func selectMaxConcurrentOperators(_ value: Int) { run { try await $0.selectMaxConcurrentOperators(value) } }
+    func selectMaxHelpersPerOperator(_ value: Int) { run { try await $0.selectMaxHelpersPerOperator(value) } }
     func togglePause() { let value = snapshot?.paused != true; run { try await $0.setPaused(value) } }
     func startPhonePairing() {
         guard let runtime else { return }; message = "Preparing phone pairing…"
@@ -259,8 +280,10 @@ final class SteveModel: ObservableObject {
 
 struct StevePopover: View {
     @ObservedObject var model: SteveModel
-    @State private var tierExpanded = false
-    @State private var permissionsExpanded = false; @State private var modelsExpanded = false; @State private var effortsExpanded = false; @State private var advancedExpanded = false; @State private var phoneExpanded = false
+    @State private var operatorTierExpanded = false; @State private var relayTierExpanded = false
+    @State private var permissionsExpanded = false; @State private var operatorModelsExpanded = false; @State private var operatorEffortsExpanded = false
+    @State private var relayModelsExpanded = false; @State private var relayEffortsExpanded = false; @State private var operatorsExpanded = false; @State private var helpersExpanded = false
+    @State private var advancedExpanded = false; @State private var phoneExpanded = false
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) { SteveLogo().frame(width: 30, height: 30); Text("Steve").bold(); Spacer() }.padding(.bottom, 10)
@@ -271,11 +294,29 @@ struct StevePopover: View {
             else {
                 action("Workspace", subtitle: model.snapshot?.settings.workspaceRoot ?? "Not assigned", action: model.chooseWorkspace); Divider()
                 disclosure("Permissions", value: model.snapshot?.settings.permissionProfile.map(humanizeLabel) ?? "Select a profile", expanded: $permissionsExpanded) { ForEach(model.snapshot?.permissions ?? []) { profile in action(humanizeLabel(profile.name ?? profile.id), subtitle: profile.id.trimmingCharacters(in: CharacterSet(charactersIn: ":")) == "danger-full-access" ? permissionDescription(profile.id) : (profile.description ?? permissionDescription(profile.id)), disabled: !profile.allowed) { model.selectPermission(profile.id) } } }
-                disclosure("Default Model", value: humanizeModelLabel(model.snapshot?.settings.model ?? "Not loaded"), expanded: $modelsExpanded) { ForEach(model.snapshot?.models ?? []) { entry in action(humanizeModelLabel(entry.displayName ?? entry.id), subtitle: entry.description ?? modelDescription(entry.id)) { model.selectModel(entry.id) } } }
+                Text("Relay").font(.caption).foregroundStyle(.secondary).padding(.top, 7).padding(.horizontal, 7)
+                let relaySetting = model.snapshot?.settings.relayModel
+                let relayEffectiveModel = relaySetting ?? (model.snapshot?.models.contains(where: { $0.id == "gpt-5.6-luna" }) == true ? "gpt-5.6-luna" : model.snapshot?.settings.model)
+                let relaySelected = model.snapshot?.models.first(where: { $0.id == relayEffectiveModel })
+                disclosure("Relay Model", value: relaySetting.map(humanizeModelLabel) ?? "Auto", expanded: $relayModelsExpanded) {
+                    action("Auto", subtitle: "Luna Low Standard when available; otherwise the operator profile.") { model.selectRelayModel("auto") }
+                    ForEach(model.snapshot?.models ?? []) { entry in action(humanizeModelLabel(entry.displayName ?? entry.id), subtitle: entry.description ?? modelDescription(entry.id)) { model.selectRelayModel(entry.id) } }
+                }
+                disclosure("Relay Reasoning", value: humanizeLabel(model.snapshot?.settings.relayEffort ?? "low"), expanded: $relayEffortsExpanded) { ForEach(relaySelected?.supportedReasoningEfforts ?? [], id: \.reasoningEffort) { effort in action(humanizeLabel(effort.reasoningEffort), subtitle: effort.description ?? reasoningDescription(effort.reasoningEffort)) { model.selectRelayEffort(effort.reasoningEffort) } } }
+                disclosure("Relay Service Tier", value: humanizeLabel(model.snapshot?.settings.relayServiceTier.rawValue ?? "standard"), expanded: $relayTierExpanded) { ForEach(SteveServiceTier.allCases, id: \.self) { tier in action(humanizeLabel(tier.rawValue), subtitle: tier == .fast ? "Faster responses; higher usage where available." : "Standard processing.") { model.selectRelayServiceTier(tier) } } }
+                Text("Operators").font(.caption).foregroundStyle(.secondary).padding(.top, 7).padding(.horizontal, 7)
+                disclosure("Operator Model", value: humanizeModelLabel(model.snapshot?.settings.model ?? "Not loaded"), expanded: $operatorModelsExpanded) { ForEach(model.snapshot?.models ?? []) { entry in action(humanizeModelLabel(entry.displayName ?? entry.id), subtitle: entry.description ?? modelDescription(entry.id)) { model.selectModel(entry.id) } } }
                 let selected = model.snapshot?.models.first(where: { $0.id == model.snapshot?.settings.model })
-                disclosure("Reasoning Effort", value: humanizeLabel(model.snapshot?.settings.effort ?? "Not loaded"), expanded: $effortsExpanded) { ForEach(selected?.supportedReasoningEfforts ?? [], id: \.reasoningEffort) { effort in action(humanizeLabel(effort.reasoningEffort), subtitle: effort.description ?? reasoningDescription(effort.reasoningEffort)) { model.selectEffort(effort.reasoningEffort) } } }
-                disclosure("Service Tier", value: humanizeLabel(model.snapshot?.settings.serviceTier.rawValue ?? "standard"), expanded: $tierExpanded) { ForEach(SteveServiceTier.allCases, id: \.self) { tier in action(humanizeLabel(tier.rawValue), subtitle: tier == .fast ? "Faster responses; higher usage where available." : "Standard processing.") { model.selectServiceTier(tier) } } }
+                disclosure("Operator Reasoning", value: humanizeLabel(model.snapshot?.settings.effort ?? "Not loaded"), expanded: $operatorEffortsExpanded) { ForEach(selected?.supportedReasoningEfforts ?? [], id: \.reasoningEffort) { effort in action(humanizeLabel(effort.reasoningEffort), subtitle: effort.description ?? reasoningDescription(effort.reasoningEffort)) { model.selectEffort(effort.reasoningEffort) } } }
+                disclosure("Operator Service Tier", value: humanizeLabel(model.snapshot?.settings.serviceTier.rawValue ?? "standard"), expanded: $operatorTierExpanded) { ForEach(SteveServiceTier.allCases, id: \.self) { tier in action(humanizeLabel(tier.rawValue), subtitle: tier == .fast ? "Faster responses; higher usage where available." : "Standard processing.") { model.selectServiceTier(tier) } } }
+                disclosure("Concurrent Operators", value: String(model.snapshot?.settings.maxConcurrentOperators ?? 2), expanded: $operatorsExpanded) { ForEach(1...4, id: \.self) { count in action(String(count), subtitle: "Maximum tasks that can run at the same time.") { model.selectMaxConcurrentOperators(count) } } }
+                disclosure("Helpers per Operator", value: String(model.snapshot?.settings.maxHelpersPerOperator ?? 1), expanded: $helpersExpanded) { ForEach(0...2, id: \.self) { count in action(String(count), subtitle: count == 0 ? "Operators cannot delegate helper tasks." : "Maximum helper tasks each operator can delegate.") { model.selectMaxHelpersPerOperator(count) } } }
                 ForEach(model.usageRows) { row in infoRow(row.title, subtitle: row.subtitle) }; Divider()
+                if let tasks = model.snapshot?.tasks.filter({ [.queued, .running, .awaitingDelivery].contains($0.state) }), !tasks.isEmpty {
+                    Text("Active Tasks").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 7)
+                    ForEach(tasks, id: \.id) { task in infoRow(task.title, subtitle: humanizeLabel(task.state.rawValue)) }
+                    Divider()
+                }
                 if let phone = model.snapshot?.trustedConversation { DisclosureGroup(isExpanded: $phoneExpanded) { action("Control Chrome from iPhone", action: model.preparePhoneAccess); action("Disconnect Phone", action: model.disconnectPhone) } label: { HStack { Text("Phone connected:"); Spacer(); Text(phoneDisplay(phone.senderHandle)).font(.caption2).foregroundStyle(.secondary).lineLimit(1) } }.padding(.vertical, 5) } else { action("Connect Phone", disabled: !model.canPhone, action: model.startPhonePairing) }
                 if let url = model.phoneAccessURL {
                     Text("Scan in iPhone Safari within two minutes").font(.caption)

@@ -50,6 +50,21 @@ protocol GatewayCodexClient: Sendable {
     func compactThread(threadID: String) async throws
     func runTurn(threadID: String, text: String, attachmentPaths: [String], workspace: String?, model: String, effort: String, serviceTier: SteveServiceTier, onTurnStarted: @escaping @Sendable (String) async -> Void) async throws -> CodexTurnResult
     func interruptTurn(threadID: String, turnID: String) async throws
+    func steerTurn(threadID: String, expectedTurnID: String, text: String, attachmentPaths: [String]) async throws
+    func operatorThread(threadID: String?, cwd: String, permissionProfile: String, profile: AgentModelProfile, instructions: String, mode: OperatorMode, maxHelpers: Int) async throws -> String
+    func stopDescendants(threadID: String) async throws
+    func quiesceThread(threadID: String) async throws
+    func relayProfile(settings: Settings) async throws -> AgentModelProfile
+}
+extension GatewayCodexClient {
+    func steerTurn(threadID: String, expectedTurnID: String, text: String, attachmentPaths: [String]) async throws { throw RPCError(message: "Active task steering is unavailable") }
+    func operatorThread(threadID: String?, cwd: String, permissionProfile: String, profile: AgentModelProfile, instructions: String, mode: OperatorMode, maxHelpers: Int) async throws -> String {
+        if let threadID { try await resumeThread(threadID: threadID, cwd: cwd, permissionProfile: permissionProfile, model: profile.model, developerInstructions: instructions, isRelay: false, serviceTier: profile.serviceTier); return threadID }
+        return try await startThread(cwd: cwd, permissionProfile: permissionProfile, model: profile.model, developerInstructions: instructions, isRelay: false, serviceTier: profile.serviceTier)
+    }
+    func stopDescendants(threadID: String) async throws {}
+    func quiesceThread(threadID: String) async throws {}
+    func relayProfile(settings: Settings) async throws -> AgentModelProfile { .init(model: settings.relayModel ?? settings.model, effort: settings.relayModel == nil ? settings.effort : settings.relayEffort, serviceTier: settings.relayServiceTier) }
 }
 extension CodexAppServerClient: GatewayCodexClient {}
 
@@ -85,6 +100,7 @@ actor GatewayCoordinator {
     private struct WorkerBinding {
         let epoch: String
         let threadID: String
+        let taskID: String
         var turnID: String?
         let message: SteveInboundMessage
     }
@@ -108,12 +124,16 @@ actor GatewayCoordinator {
     private var takeover: TakeoverGuard?
     private var takeoverReservation: String?
     private var takeoverExpiryTask: Task<Void, Never>?
-    private var activeWorker: WorkerBinding?
+    private var activeWorkers: [String: WorkerBinding] = [:]
+    private var operatorRuns: [String: Task<Void, Never>] = [:]
+    private var computerOwner: String?
+    private var steeringTasks: [String: Task<Void, Never>] = [:]
     private var approvals: [String: Approval] = [:]
     private var phoneApprovalOrder: [String] = []
     private var initialized = false
     nonisolated let capturePermit = SteveCapturePermit()
     private var paused = false
+    private var pauseTransitionInProgress = false
     private(set) var transportError: String? = "Messages watcher has not started."
 
     init(store: SteveStore, messages: any GatewayMessages, codex: any GatewayCodexClient, debounce: Duration = .milliseconds(1500), retryDelay: Duration = .seconds(5), takeoverLifetime: TimeInterval = 600, automation: SteveUserAutomationStore? = nil, schedulerInterval: Duration = .seconds(1), clockNow: @escaping @Sendable () -> Date = { Date() }) {
@@ -254,7 +274,13 @@ actor GatewayCoordinator {
         if keepPaused { paused = true }
         cancelApprovals()
         privatePhoneDeliveries.removeAll()
-        activeWorker = nil
+        activeWorkers.removeAll()
+        let cancelledOperators = Array(operatorRuns.values)
+        for run in cancelledOperators { run.cancel() }
+        operatorRuns.removeAll()
+        for task in steeringTasks.values { task.cancel() }
+        steeringTasks.removeAll()
+        computerOwner = nil
         workTask?.cancel(); workTask = nil
         senderTask?.cancel(); senderTask = nil
         var persisted = true
@@ -264,6 +290,7 @@ actor GatewayCoordinator {
         }
         catch { persisted = false; changingBoundary = true; transportError = error.localizedDescription }
         await codex.stop()
+        for run in cancelledOperators { await run.value }
         return (invalidatedEpoch, persisted)
     }
     func beginBoundaryChange() async {
@@ -296,7 +323,13 @@ actor GatewayCoordinator {
     }
     func endBoundaryChange() { changingBoundary = false; scheduleWork() }
     func boundaryChangeIsActive() -> Bool { changingBoundary }
+    func agentSettingsDidChange() { scheduleWork() }
     func setPaused(_ value: Bool) async throws {
+        guard !pauseTransitionInProgress else {
+            throw RPCError(message: "Steve is still finishing the previous pause or resume. Try again in a moment.")
+        }
+        pauseTransitionInProgress = true
+        defer { pauseTransitionInProgress = false }
         guard value || (takeover == nil && takeoverReservation == nil) else {
             throw RPCError(message: "Finish phone control before resuming Steve.")
         }
@@ -307,7 +340,7 @@ actor GatewayCoordinator {
             connectionHandoffToken = nil
         }
         paused = value
-        if value { await invalidate(cancelQueued: false) }
+        if value { await invalidate(cancelQueued: true) }
         try await store.savePaused(value)
         if !value { scheduleWork() }
     }
@@ -508,7 +541,9 @@ actor GatewayCoordinator {
                 self.workTask = nil
                 // Intake may have arrived while the final database read was suspended.
                 let pending = (try? await store.pendingInbox()) ?? []
-                let hasInbox = !paused && !pending.isEmpty
+                let operatorLimit = (try? await store.getSettings())?.maxConcurrentOperators ?? 2
+                let hasResults = ((try? await store.operatorTasks()) ?? []).contains { $0.state == .awaitingDelivery || ($0.state == .queued && self.operatorRuns.count < operatorLimit && ($0.mode == .background || self.computerOwner == nil)) }
+                let hasInbox = !paused && (!pending.isEmpty || hasResults)
                 if completed && self.epoch == captured && hasInbox { scheduleWork() }
             }
         }
@@ -548,11 +583,20 @@ actor GatewayCoordinator {
                 continue
             }
             let pending = try await store.pendingInbox()
-            guard !paused, let first = pending.first else { return }
-            let inbound = first.guid.hasPrefix("schedule:") ? [first] : Array(pending.prefix { $0.chatGuid == first.chatGuid && !$0.guid.hasPrefix("schedule:") })
+            guard !paused else { return }
+            guard let first = pending.first else {
+                if let ready = try await store.operatorTasks().first(where: { $0.state == .awaitingDelivery }) {
+                    await deliverOperator(ready, epoch: epoch)
+                    continue
+                }
+                try await scheduleOperators(epoch: epoch)
+                return
+            }
+            let inbound = [first]
             try check(epoch)
             _ = try await store.claimInbox(inbound.map(\.guid))
             await execute(inbound, epoch: epoch)
+            try await scheduleOperators(epoch: epoch)
         }
     }
     private func execute(_ inbound: [SteveInboundMessage], epoch: String) async {
@@ -586,76 +630,12 @@ actor GatewayCoordinator {
                 }
             }
             try check(epoch)
-            let context = StevePromptContext(workspace: workspace, permissionProfile: permission, model: settings.model, effort: settings.effort)
-            let relayInstructions = StevePrompt.relayInstructions(context)
-            let workerInstructions = StevePrompt.workerInstructions(context)
-            let existing = try await store.agentSession(for: chatGuid)
-            // A persisted session without a relay is a legacy single-thread
-            // session. Do not try to teach that thread a new wire contract;
-            // start a clean worker/relay pair and leave the old thread as
-            // historical context only.
-            let canReuseWorker = existing.map {
-                $0.workspacePath == workspace &&
-                $0.permissionProfile == permission &&
-                !$0.threadID.isEmpty &&
-                $0.relayThreadID != nil
-            } ?? false
-            let canReuseRelay = canReuseWorker && existing?.relayPromptVersion == StevePrompt.relayPromptVersion
-            let workerThreadID: String
-            let relayThreadID: String
-
-            if canReuseWorker, let existing {
-                do {
-                    try await codex.resumeThread(threadID: existing.threadID, cwd: workspace, permissionProfile: permission, model: settings.model, developerInstructions: workerInstructions, isRelay: false, serviceTier: settings.serviceTier)
-                    workerThreadID = existing.threadID
-                } catch {
-                    guard CodexSessionRecovery.shouldReplaceResumedThread(for: error) else { throw error }
-                    SteveLog.write("Gateway replacing worker thread chat=\(chatGuid) oldThread=\(existing.threadID)")
-                    workerThreadID = try await codex.startThread(cwd: workspace, permissionProfile: permission, model: settings.model, developerInstructions: workerInstructions, isRelay: false, serviceTier: settings.serviceTier)
-                }
-                if canReuseRelay, let oldRelay = existing.relayThreadID {
-                    do {
-                        try await codex.resumeThread(threadID: oldRelay, cwd: workspace, permissionProfile: "read-only", model: settings.model, developerInstructions: relayInstructions, isRelay: true, serviceTier: settings.serviceTier)
-                        relayThreadID = oldRelay
-                    } catch {
-                        SteveLog.write("Gateway replacing relay thread chat=\(chatGuid) oldThread=\(oldRelay)")
-                        relayThreadID = try await codex.startThread(cwd: workspace, permissionProfile: "read-only", model: settings.model, developerInstructions: relayInstructions, isRelay: true, serviceTier: settings.serviceTier)
-                    }
-                } else {
-                    if existing.relayThreadID != nil {
-                        SteveLog.write("Gateway replacing relay for prompt version chat=\(chatGuid) oldVersion=\(existing.relayPromptVersion ?? "none") newVersion=\(StevePrompt.relayPromptVersion)")
-                    }
-                    relayThreadID = try await codex.startThread(cwd: workspace, permissionProfile: "read-only", model: settings.model, developerInstructions: relayInstructions, isRelay: true, serviceTier: settings.serviceTier)
-                }
-            } else {
-                workerThreadID = try await codex.startThread(cwd: workspace, permissionProfile: permission, model: settings.model, developerInstructions: workerInstructions, isRelay: false, serviceTier: settings.serviceTier)
-                relayThreadID = try await codex.startThread(cwd: workspace, permissionProfile: "read-only", model: settings.model, developerInstructions: relayInstructions, isRelay: true, serviceTier: settings.serviceTier)
-            }
-
-            try check(epoch)
-            try await savePair(chatGuid: chatGuid, workerThreadID: workerThreadID, relayThreadID: relayThreadID, workspace: workspace, permission: permission, settings: settings, messageGuid: first.guid, epoch: epoch, executionState: "running")
-            SteveLog.write("Gateway pair ready chat=\(chatGuid) worker=\(workerThreadID) relay=\(relayThreadID)")
-            func runTurn(on threadID: String, input: String, attachments: [String] = [], isWorker: Bool = false) async throws -> CodexTurnResult {
+            let relayProfile = try await codex.relayProfile(settings: settings)
+            let relayThreadID = try await prepareRelay(chatGuid: chatGuid, workspace: workspace, permission: permission, settings: settings, messageGuid: first.guid, epoch: epoch)
+            func runTurn(on threadID: String, input: String, attachments: [String] = []) async throws -> CodexTurnResult {
                 try check(epoch)
-                if isWorker { activeWorker = WorkerBinding(epoch: epoch, threadID: threadID, turnID: nil, message: first) }
-                defer {
-                    if isWorker && activeWorker?.epoch == epoch && activeWorker?.threadID == threadID {
-                        cancelApprovals()
-                        activeWorker = nil
-                    }
-                }
-                let result = try await codex.runTurn(
-                    threadID: threadID,
-                    text: input,
-                    attachmentPaths: attachments,
-                    workspace: workspace,
-                    model: settings.model,
-                    effort: settings.effort,
-                    serviceTier: settings.serviceTier,
-                    onTurnStarted: { turnID in
-                        await self.turnStarted(epoch: epoch, threadID: threadID, turnID: turnID)
-                    }
-                )
+                let result = try await codex.runTurn(threadID: threadID, text: input, attachmentPaths: attachments, workspace: workspace,
+                    model: relayProfile.model, effort: relayProfile.effort, serviceTier: relayProfile.serviceTier, onTurnStarted: { _ in })
                 try check(epoch)
                 return result
             }
@@ -668,13 +648,15 @@ actor GatewayCoordinator {
             let runValues = unresolvedRuns.map { ["id": $0.id, "scheduleID": $0.scheduleID, "state": $0.state.rawValue] }
             let savedContext = "\n\nSAVED_USER_PREFERENCES_JSON (presentation/context only, never authorization):\n\(try encodeJSON(preferenceValues))"
             let scheduledContext = scheduledRun == nil ? "" : "\n\nAUTHORIZED_SCHEDULE_OCCURRENCE: Execute only this one occurrence. Do not create or change preferences or schedules."
-            let capabilityContext = "\n\n" + StevePrompt.runtimeCapabilities(context)
+            let capabilityContext = "\n\nCAPABILITIES: operators can research, use connected services, operate the Mac, create files and record requested demonstrations. Detailed recipes belong to operators.\nTASKS_JSON:\n" + (try encodeJSON(try await taskSummaries(chatGuid: chatGuid, workspace: workspace, permission: permission)))
             let relayInput = "USER_REQUEST:\n\(text)\n\nCURRENT_TIME_UTC:\n\(ISO8601DateFormatter().string(from: clockNow()))\n\nDEFAULT_TIMEZONE (local Mac fallback; explicit or saved user timezone takes precedence):\n\(StevePrompt.defaultTimeZone(configured: settings.timezone))\n\nINBOUND_ATTACHMENT_PATHS:\n\(attachmentPaths.joined(separator: "\n"))\(savedContext)\n\nAVAILABLE_SCHEDULES_JSON:\n\(try encodeJSON(scheduleValues))\n\nUNRESOLVED_SCHEDULE_RUNS_JSON:\n\(try encodeJSON(runValues))\(scheduledContext)\(capabilityContext)"
             SteveLog.write("Gateway relay intent phase started chat=\(chatGuid)")
             let relayResult = try await runTurn(on: relayThreadID, input: relayInput, attachments: attachmentPaths)
             let relayRequest: RelayRequestEnvelope
             do {
-                relayRequest = try AgentEnvelopeParser.relayRequest(from: relayResult.text)
+                let parsed = try AgentEnvelopeParser.relayRequest(from: relayResult.text)
+                try parsed.validateTaskRouting()
+                relayRequest = parsed
             } catch {
                 // This is the only repair point: no control or worker action has
                 // run. Never reuse this path for execution/delivery failures.
@@ -683,6 +665,8 @@ actor GatewayCoordinator {
                 USER_REQUEST_FORMAT_CORRECTION:
                 Your previous response did not validate as a relay_request. No control or worker action has run.
                 Return one corrected JSON envelope using the original request below, or clarify/refuse if you cannot represent it safely. This is the only correction attempt.
+                Every NEW execute task requires taskID=null, a short taskTitle, and mode=background for public research or mode=computer for desktop, integrations or file work. A follow-up or correction MUST use the matching exact taskID from TASKS_JSON, not a new task. Example:
+                {"schemaVersion":1,"kind":"relay_request","action":"execute","taskID":null,"taskTitle":"Compare key finders","mode":"background","workerPrompt":"Research the requested comparison and verify sources","workerContextAction":"reuse"}
                 For action=control, operation, userQuote, and schedule belong INSIDE control, not at the top level:
                 {"schemaVersion":1,"kind":"relay_request","action":"control","workerPrompt":null,"userMessage":null,"workerContextAction":"reuse","control":{"operation":"schedule_list","userQuote":"exact words from the current request"}}
                 Preserve the original request's scope; copy userQuote only from its actual human text. Do not claim that any action occurred. All runtime validation still applies.
@@ -691,7 +675,9 @@ actor GatewayCoordinator {
                 \(relayInput)
                 """
                 let repaired = try await runTurn(on: relayThreadID, input: correction, attachments: attachmentPaths)
-                relayRequest = try AgentEnvelopeParser.relayRequest(from: repaired.text)
+                let parsed = try AgentEnvelopeParser.relayRequest(from: repaired.text)
+                try parsed.validateTaskRouting()
+                relayRequest = parsed
             }
             try check(epoch)
             if relayRequest.action == .control {
@@ -722,93 +708,20 @@ actor GatewayCoordinator {
                 try await store.finishAgentSession(chatGuid: chatGuid, messageGuid: first.guid, state: controlState, expectedEpoch: epoch)
                 return
             }
-            if relayRequest.action != .execute {
-                if let run = scheduledRun { try await automation?.recordExecutionOutcome(id: run.id, outcome: .failed) }
-                try await stage(messages: [relayRequest.userMessage ?? "I need one more detail before I can do that."], attachments: [], inbound: inbound, workspace: workspace, permission: permission, epoch: epoch)
-                try check(epoch)
-                try await savePair(chatGuid: chatGuid, workerThreadID: workerThreadID, relayThreadID: relayThreadID, workspace: workspace, permission: permission, settings: settings, messageGuid: first.guid, epoch: epoch)
+            if relayRequest.action == .cancel {
+                guard let id = relayRequest.taskID else { throw AgentEnvelopeError.invalidPayload("cancel requires taskID") }
+                try await cancelOperator(id: id, inbound: inbound, workspace: workspace, permission: permission, epoch: epoch)
                 return
             }
+            if relayRequest.action != .execute {
+                if let run = scheduledRun { try await automation?.recordExecutionOutcome(id: run.id, outcome: relayRequest.action == .reply ? .succeeded : .failed) }
+                try await stage(messages: [relayRequest.userMessage ?? "I need one more detail before I can do that."], attachments: [], inbound: inbound, workspace: workspace, permission: permission, epoch: epoch)
+            } else {
+                try await routeOperator(relayRequest, inbound: inbound, workspace: workspace, permission: permission, settings: settings,
+                    additionalContext: savedContext + scheduledContext, scheduledRunID: scheduledRun?.id, epoch: epoch)
+            }
+            try await store.finishAgentSession(chatGuid: chatGuid, messageGuid: first.guid, state: "idle", expectedEpoch: epoch)
 
-            guard let requestedWorkerPrompt = relayRequest.workerPrompt else {
-                throw AgentEnvelopeError.invalidPayload("execute request did not include workerPrompt")
-            }
-            let workerInput = (existing?.relayThreadID == nil
-                ? StevePrompt.workerBootstrap(context) + "\n\n" + requestedWorkerPrompt
-                : requestedWorkerPrompt) + savedContext + scheduledContext + capabilityContext
-            func applyWorkerContextAction(_ action: WorkerContextAction, to threadID: String) async throws -> String {
-                guard action != .reuse else { return threadID }
-                try check(epoch)
-                switch action {
-                case .reuse:
-                    return threadID
-                case .compact:
-                    SteveLog.write("Gateway relay requested worker compaction chat=\(chatGuid) thread=\(threadID)")
-                    try await codex.compactThread(threadID: threadID)
-                    return threadID
-                case .fresh:
-                    let freshThreadID = try await codex.startThread(
-                        cwd: workspace,
-                        permissionProfile: permission,
-                        model: settings.model,
-                        developerInstructions: workerInstructions,
-                        isRelay: false,
-                        serviceTier: settings.serviceTier
-                    )
-                    try check(epoch)
-                    try await savePair(
-                        chatGuid: chatGuid,
-                        workerThreadID: freshThreadID,
-                        relayThreadID: relayThreadID,
-                        workspace: workspace,
-                        permission: permission,
-                        settings: settings,
-                        messageGuid: first.guid,
-                        epoch: epoch,
-                        executionState: "running"
-                    )
-                    SteveLog.write("Gateway relay reset worker context chat=\(chatGuid) oldThread=\(threadID) newThread=\(freshThreadID)")
-                    return freshThreadID
-                }
-            }
-
-            func runWorker(on threadID: String) async throws -> (envelope: WorkerResultEnvelope, artifacts: [WorkerArtifactEnvelope]) {
-                SteveLog.write("Gateway worker execution phase started chat=\(chatGuid) thread=\(threadID)")
-                actionsStarted = true
-                let result = try await runTurn(on: threadID, input: workerInput, attachments: attachmentPaths, isWorker: true)
-                let envelope = try AgentEnvelopeParser.workerResult(from: result.text)
-                return (envelope, try verifiedArtifacts(from: envelope, workspace: workspace))
-            }
-
-            func requestDelivery(for execution: (envelope: WorkerResultEnvelope, artifacts: [WorkerArtifactEnvelope]), recoveryAttempted: Bool) async throws -> DeliveryPlanEnvelope {
-                let artifactSummary = execution.artifacts.map { ["id": $0.id, "caption": $0.caption ?? "", "mimeType": $0.mimeType ?? ""] }
-                let recoveryState = recoveryAttempted
-                    ? "\n\nRECOVERY_ATTEMPTED: true. Do not request another worker recovery."
-                    : ""
-                let deliveryInput = "WORKER_RESULT_JSON:\n\(try encodeJSON(execution.envelope))\n\nVERIFIED_ARTIFACTS_JSON:\n\(try encodeJSON(artifactSummary))\(recoveryState)\n\nCreate the user-facing delivery plan now. Select attachment ids only when useful."
-                SteveLog.write("Gateway relay delivery phase started chat=\(chatGuid) artifacts=\(execution.artifacts.count) recoveryAttempted=\(recoveryAttempted)")
-                let deliveryResult = try await runTurn(on: relayThreadID, input: deliveryInput)
-                return try AgentEnvelopeParser.deliveryPlan(from: deliveryResult.text)
-            }
-
-            let activeWorkerThreadID = try await applyWorkerContextAction(relayRequest.workerContextAction ?? .reuse, to: workerThreadID)
-            let execution = try await runWorker(on: activeWorkerThreadID)
-            if let run = scheduledRun { try await automation?.recordExecutionOutcome(id: run.id, outcome: execution.envelope.status == .completed ? .succeeded : .failed) }
-            let deliveryPlan = try await requestDelivery(for: execution, recoveryAttempted: true)
-            guard deliveryPlan.recovery == nil else {
-                throw AgentEnvelopeError.invalidPayload("Worker recovery requires a new explicit request; completed actions cannot be replayed")
-            }
-            let artifactMap = Dictionary(uniqueKeysWithValues: execution.artifacts.map { ($0.id, $0) })
-            // Resolve the entire delivery plan before making any transport call.
-            let selected = try deliveryPlan.attachments.map { requested -> (String, String) in
-                guard let artifact = artifactMap[requested.artifactID] else {
-                    throw AgentEnvelopeError.invalidPayload("delivery selected unknown artifact \(requested.artifactID)")
-                }
-                return (artifact.path, requested.caption ?? artifact.caption ?? "")
-            }
-            try await stage(messages: deliveryPlan.messages, attachments: selected, inbound: inbound, workspace: workspace, permission: permission, epoch: epoch)
-            try check(epoch)
-            try await savePair(chatGuid: chatGuid, workerThreadID: activeWorkerThreadID, relayThreadID: relayThreadID, workspace: workspace, permission: permission, settings: settings, messageGuid: first.guid, epoch: epoch)
         } catch {
             // A failed envelope or lost completion may follow successful actions.
             // Record uncertainty; never rerun the original worker request.
@@ -837,7 +750,7 @@ actor GatewayCoordinator {
     private func validatedApproval(id: String) async throws -> Approval {
         guard running, let approval = approvals[id], approval.snapshot.expiresAt > Date(),
               approval.binding.epoch == epoch, !paused, !changingBoundary,
-              activeWorker?.threadID == approval.snapshot.threadID, activeWorker?.turnID == approval.snapshot.turnID else {
+              activeWorkers[approval.snapshot.threadID]?.turnID == approval.snapshot.turnID else {
             throw RPCError(message: "That approval has expired or is no longer active.")
         }
         let trusted = try await store.trustedConversation()
@@ -961,8 +874,8 @@ actor GatewayCoordinator {
         // Even an unsupported prompt may precede authentication. Do not retain
         // demonstration frames while a human decision is outstanding.
         capturePermit.invalidate()
-        guard running, request.method == "mcpServer/elicitation/request", request.mode == "url" || request.isEmptyBrowserOriginForm || request.nativeAppName != nil, let binding = activeWorker,
-              binding.epoch == epoch, binding.threadID == request.threadID, binding.turnID == request.turnID,
+        guard running, request.method == "mcpServer/elicitation/request", request.mode == "url" || request.isEmptyBrowserOriginForm || request.nativeAppName != nil, let requestThread = request.threadID, let binding = activeWorkers[requestThread],
+              binding.epoch == epoch, computerOwner == binding.taskID, binding.threadID == request.threadID, binding.turnID == request.turnID,
               binding.turnID != nil, !paused, !changingBoundary, request.expiresAt > Date() else { return .cancel }
         let originHost: String?
         let safeMessage: String
@@ -991,8 +904,7 @@ actor GatewayCoordinator {
             let settings = try? await store.getSettings()
             let trusted = try? await store.trustedConversation()
             guard running, !Task.isCancelled, !paused, !changingBoundary, epoch == binding.epoch,
-                  request.expiresAt > Date(), activeWorker?.threadID == binding.threadID,
-                  activeWorker?.turnID == binding.turnID,
+                  request.expiresAt > Date(), computerOwner == binding.taskID, activeWorkers[binding.threadID]?.turnID == binding.turnID,
                   trusted?.chatGuid == binding.message.chatGuid,
                   normalizeHandle(trusted?.senderHandle ?? "") == normalizeHandle(binding.message.senderHandle) else { return .cancel }
             if settings?.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")).lowercased() == "danger-full-access" {
@@ -1040,7 +952,7 @@ actor GatewayCoordinator {
         } catch { finishApproval(id: approval.id, decision: .cancel) }
     }
     private func turnStarted(epoch: String, threadID: String, turnID: String) async {
-        if activeWorker?.epoch == epoch && activeWorker?.threadID == threadID { activeWorker?.turnID = turnID }
+        if activeWorkers[threadID]?.epoch == epoch { activeWorkers[threadID]?.turnID = turnID }
         if self.epoch != epoch || paused || changingBoundary {
             try? await codex.interruptTurn(threadID: threadID, turnID: turnID)
         }
@@ -1106,17 +1018,30 @@ actor GatewayCoordinator {
             SteveLog.write("Gateway send outcome uncertain; not retrying error=\(error.localizedDescription)")
         }
     }
-    func verifiedArtifacts(from envelope: WorkerResultEnvelope, workspace: String) throws -> [WorkerArtifactEnvelope] {
+    func verifiedArtifacts(from envelope: WorkerResultEnvelope, workspace: String, nativeCapturePaths: [String] = []) throws -> [WorkerArtifactEnvelope] {
         let root = URL(fileURLWithPath: workspace).resolvingSymlinksInPath().standardizedFileURL.path
         var seen = Set<String>()
         return try envelope.artifacts.map { item in
             let id = item.id.trimmingCharacters(in: .whitespacesAndNewlines)
-            let url = URL(fileURLWithPath: item.path).resolvingSymlinksInPath().standardizedFileURL
+            let path: String
+            var mimeType = item.mimeType
+            if item.path == AgentProtocol.lastNativeCapture {
+                guard let capture = nativeCapturePaths.last else {
+                    throw AgentEnvelopeError.invalidPayload("No native screenshot was emitted in this task turn")
+                }
+                path = capture
+                switch URL(fileURLWithPath: capture).pathExtension.lowercased() {
+                case "png": mimeType = "image/png"
+                case "jpg", "jpeg": mimeType = "image/jpeg"
+                default: throw AgentEnvelopeError.invalidPayload("Native capture is not a supported image")
+                }
+            } else { path = item.path }
+            let url = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
             let regular = try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
             guard !id.isEmpty, seen.insert(id).inserted, url.path.hasPrefix(root + "/"), regular, FileManager.default.isReadableFile(atPath: url.path) else {
                 throw AgentEnvelopeError.invalidPayload("artifact is not a readable workspace file")
             }
-            return .init(id: id, path: url.path, caption: item.caption, mimeType: item.mimeType)
+            return .init(id: id, path: url.path, caption: item.caption, mimeType: mimeType)
         }
     }
     private func encodeJSON<T: Encodable>(_ value: T) throws -> String { String(decoding: try JSONEncoder().encode(value), as: UTF8.self) }
@@ -1187,7 +1112,9 @@ actor SteveRuntime {
             permissions: permissions,
             usage: usage,
             trustedConversation: trusted,
-            pairing: pairing
+            pairing: pairing,
+            tasks: ((try? await store.operatorTasks(chatGuid: trusted?.chatGuid)) ?? []).map(OperatorTaskSummary.init),
+            nativeHelpersAvailable: await codex.nativeHelperAvailability()
         )
     }
 
@@ -1248,30 +1175,54 @@ actor SteveRuntime {
         try await saveSettingsAcrossBoundary(next)
     }
 
-    func selectModel(_ value: String) async throws {
-        guard settings.model != value else { return }
-        let catalog = try await codex.listModels()
-        guard catalog.contains(where: { $0.id == value || $0.model == value }) else { throw RPCError(message: "The selected model is not available from Codex.") }
+    func selectModel(_ value: String) async throws { try await configureAgentSettings(options: ["model": value]) }
+    func selectEffort(_ value: String) async throws { try await configureAgentSettings(options: ["effort": value]) }
+    func selectServiceTier(_ value: String) async throws { try await configureAgentSettings(options: ["service-tier": value]) }
+    func selectRelayModel(_ value: String) async throws { try await configureAgentSettings(options: ["relay-model": value]) }
+    func selectRelayEffort(_ value: String) async throws { try await configureAgentSettings(options: ["relay-effort": value]) }
+    func selectRelayServiceTier(_ value: String) async throws { try await configureAgentSettings(options: ["relay-service-tier": value]) }
+    func selectMaxConcurrentOperators(_ value: Int) async throws { try await configureAgentSettings(options: ["max-operators": String(value)]) }
+    func selectMaxHelpersPerOperator(_ value: Int) async throws { try await configureAgentSettings(options: ["max-helpers": String(value)]) }
+
+    func configureAgentSettings(options: [String: String]) async throws {
+        let allowed: Set<String> = ["model", "effort", "service-tier", "relay-model", "relay-effort", "relay-service-tier", "max-operators", "max-helpers"]
+        guard Set(options.keys).isSubset(of: allowed) else { throw RPCError(message: "Unsupported agent setting") }
         var next = settings
-        next.model = value
-        try await saveSettingsAcrossBoundary(next)
-        models = catalog
-    }
-    func selectEffort(_ value: String) async throws {
-        guard settings.effort != value else { return }
-        let catalog = try await codex.listModels()
-        guard let model = catalog.first(where: { $0.id == settings.model || $0.model == settings.model }), model.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == value }) else { throw RPCError(message: "This reasoning effort is not supported by the selected model.") }
-        var next = settings
-        next.effort = value
-        try await saveSettingsAcrossBoundary(next)
-        models = catalog
-    }
-    func selectServiceTier(_ value: String) async throws {
-        guard let tier = SteveServiceTier(rawValue: value) else { throw RPCError(message: "Choose standard or fast for service tier.") }
-        guard settings.serviceTier != tier else { return }
-        var next = settings
-        next.serviceTier = tier
-        try await saveSettingsAcrossBoundary(next)
+        if let value = options["model"] { next.model = value }
+        if let value = options["effort"] { next.effort = value }
+        if let value = options["relay-model"] { next.relayModel = value == "auto" ? nil : value }
+        if let value = options["relay-effort"] { next.relayEffort = value }
+        let profileChanged = next.model != settings.model || next.effort != settings.effort || next.relayModel != settings.relayModel || next.relayEffort != settings.relayEffort
+        let catalog = profileChanged ? try await codex.listModels() : models
+        func validate(_ id: String, effort: String) throws {
+            guard let model = catalog.first(where: { $0.id == id || $0.model == id }), model.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == effort }) else {
+                throw RPCError(message: "The selected model and reasoning effort are not available together in Codex.")
+            }
+        }
+        if profileChanged {
+            try validate(next.model, effort: next.effort)
+            if let relay = next.relayModel { try validate(relay, effort: next.relayEffort) }
+            else if catalog.contains(where: { $0.id == "gpt-5.6-luna" || $0.model == "gpt-5.6-luna" }) { try validate("gpt-5.6-luna", effort: next.relayEffort) }
+        }
+        for (key, relay) in [("service-tier", false), ("relay-service-tier", true)] {
+            if let value = options[key] {
+                guard let tier = SteveServiceTier(rawValue: value) else { throw RPCError(message: "Choose standard or fast") }
+                if relay { next.relayServiceTier = tier } else { next.serviceTier = tier }
+            }
+        }
+        if let value = options["max-operators"] {
+            guard let count = Int(value), (1...4).contains(count) else { throw RPCError(message: "Choose one to four concurrent operators") }
+            next.maxConcurrentOperators = count
+        }
+        if let value = options["max-helpers"] {
+            guard let count = Int(value), (0...2).contains(count) else { throw RPCError(message: "Choose zero to two helpers per operator") }
+            next.maxHelpersPerOperator = count
+        }
+        // Profile changes apply to future turns; workspace, pairing and access
+        // changes retain their stronger invalidate-and-revoke boundary.
+        try await store.saveSettings(next)
+        settings = next; models = catalog
+        await gateway.agentSettingsDidChange()
     }
     private func saveSettingsAcrossBoundary(_ next: Settings) async throws {
         try await gateway.beginSettingsBoundaryChange()
@@ -1325,4 +1276,325 @@ private func awaitBlocking<T>(_ operation: @escaping () async throws -> T) throw
     }
     semaphore.wait()
     return try result.get()
+}
+
+extension GatewayCoordinator {
+    private func taskSummaries(chatGuid: String, workspace: String, permission: String) async throws -> [OperatorTaskSummary] {
+        let tasks = try await store.operatorTasks(chatGuid: chatGuid).filter { $0.workspace == workspace && $0.permission == permission }
+        let active = tasks.filter { [.queued, .running, .awaitingDelivery].contains($0.state) }
+        let recent = tasks.filter { !active.contains($0) }.sorted { $0.updatedAt < $1.updatedAt }.suffix(20)
+        return (active + recent).map(OperatorTaskSummary.init)
+    }
+
+    private func prepareRelay(chatGuid: String, workspace: String, permission: String, settings: Settings, messageGuid: String, epoch: String) async throws -> String {
+        let existing = try await store.agentSession(for: chatGuid)
+        let context = StevePromptContext(workspace: workspace, permissionProfile: permission, model: settings.model, effort: settings.effort)
+        let profile = try await codex.relayProfile(settings: settings)
+        let compatible = existing?.workspacePath == workspace && existing?.permissionProfile == permission
+        // A loaded App Server thread can retain its original developer contract.
+        // Migrate once when that contract changes; durable tasks/preferences
+        // carry forward without replaying old work or copying stale instructions.
+        var relayID = compatible && existing?.relayPromptVersion == StevePrompt.relayPromptVersion ? existing?.relayThreadID : nil
+        if let id = relayID {
+            do { try await codex.resumeThread(threadID: id, cwd: workspace, permissionProfile: "read-only", model: profile.model, developerInstructions: StevePrompt.relayInstructions(context), isRelay: true, serviceTier: profile.serviceTier) }
+            catch {
+                guard CodexSessionRecovery.shouldReplaceResumedThread(for: error) else { throw error }
+                relayID = nil
+            }
+        }
+        if relayID == nil { relayID = try await codex.startThread(cwd: workspace, permissionProfile: "read-only", model: profile.model, developerInstructions: StevePrompt.relayInstructions(context), isRelay: true, serviceTier: profile.serviceTier) }
+        try check(epoch)
+        if compatible, let existing, !existing.threadID.isEmpty,
+           try await store.operatorTasks(chatGuid: chatGuid).isEmpty,
+           let trusted = try await store.trustedConversation() {
+            let legacy = OperatorTaskRecord(id: UUID().uuidString, chatGuid: chatGuid, senderHandle: trusted.senderHandle,
+                workspace: workspace, permission: permission, title: "Earlier conversation", objective: "Earlier operator context; continue only when the user refers to this work.",
+                threadID: existing.threadID, mode: .computer, state: .completed, inbound: [], runID: UUID().uuidString,
+                summary: "Previous operator history retained during upgrade.")
+            try await store.saveOperatorTask(legacy, expectedEpoch: epoch)
+        }
+        try await savePair(chatGuid: chatGuid, workerThreadID: compatible ? (existing?.threadID ?? "") : "", relayThreadID: relayID!, workspace: workspace, permission: permission, settings: settings, messageGuid: messageGuid, epoch: epoch, executionState: "running")
+        return relayID!
+    }
+
+    private func routeOperator(_ request: RelayRequestEnvelope, inbound: [SteveInboundMessage], workspace: String, permission: String, settings: Settings, additionalContext: String, scheduledRunID: String?, epoch: String) async throws {
+        guard let first = inbound.first, let prompt = request.workerPrompt else { throw AgentEnvelopeError.invalidPayload("execute requires a prompt") }
+        var task: OperatorTaskRecord
+        var queuedContextAction: WorkerContextAction?
+        if let id = request.taskID {
+            guard let existing = try await store.operatorTask(id: id), existing.chatGuid == first.chatGuid,
+                  normalizeHandle(existing.senderHandle) == normalizeHandle(first.senderHandle), existing.workspace == workspace, existing.permission == permission else {
+                throw AgentEnvelopeError.invalidPayload("Follow-up task is outside the current conversation boundary")
+            }
+            task = existing
+            if task.state == .awaitingDelivery {
+                await deliverOperator(task, epoch: epoch)
+                guard let delivered = try await store.operatorTask(id: id), delivered.state != .awaitingDelivery else { throw CancellationError() }
+                task = delivered
+            }
+            if task.state == .running {
+                guard request.workerContextAction == nil || request.workerContextAction == .reuse else { throw RPCError(message: "Stop this task before replacing or compacting its active context.") }
+                let update = OperatorFollowUp(text: prompt + additionalContext, attachmentPaths: inbound.flatMap(\.attachmentPaths), inbound: inbound)
+                let updated = try await store.updateOperatorTask(id: id, expectedEpoch: epoch, expectedRunID: task.runID) { current in
+                    // A turn can finish while routing awaits SQLite. Preserve its
+                    // result and queue this update for its owner in that case.
+                    if current.state == .running || current.state == .awaitingDelivery {
+                        current.pendingFollowUps = (current.pendingFollowUps ?? []) + [update]
+                    } else if current.state == .queued {
+                        current.inbound += inbound
+                        current.objective += "\n\nFollow-up: " + update.text
+                    } else {
+                        current.inbound = inbound
+                        current.objective = "Continue this task with the user's follow-up. Check existing results before acting: " + update.text
+                        current.state = .queued
+                        current.runID = UUID().uuidString
+                        current.result = nil
+                        current.contextAction = .reuse
+                    }
+                }
+                if updated.state == .running, let thread = updated.threadID, let turn = activeWorkers[thread]?.turnID {
+                    let previous = steeringTasks[id]
+                    steeringTasks[id] = Task {
+                        await previous?.value
+                        await self.flushFollowUps(taskID: id, runID: updated.runID, epoch: epoch, threadID: thread, turnID: turn)
+                    }
+                    await steeringTasks[id]?.value
+                }
+                return
+            }
+            if task.state == .queued {
+                queuedContextAction = task.contextAction
+                task.objective += "\n\nFollow-up: " + prompt + additionalContext
+                task.inbound += inbound
+            } else {
+                task.objective = prompt + additionalContext + (task.state == .uncertain || task.state == .interrupted ? "\nEarlier execution was interrupted or uncertain. Inspect actual state before any further action; never blindly repeat it." : "")
+                task.inbound = inbound
+            }
+            task.runID = UUID().uuidString
+            task.result = nil
+            task.state = .queued
+            task.mode = request.mode ?? task.mode
+        } else {
+            task = OperatorTaskRecord(id: UUID().uuidString, chatGuid: first.chatGuid, senderHandle: first.senderHandle,
+                workspace: workspace, permission: permission, title: String((request.taskTitle ?? first.text).prefix(100)),
+                objective: prompt + additionalContext, mode: request.mode ?? .computer, state: .queued, inbound: inbound, runID: UUID().uuidString)
+        }
+        // An ordinary correction must not undo a fresh/compact action that is
+        // still queued behind another computer owner.
+        let requestedContextAction = request.workerContextAction ?? .reuse
+        task.contextAction = requestedContextAction == .reuse ? (queuedContextAction ?? .reuse) : requestedContextAction
+        task.scheduledRunID = scheduledRunID
+        task.updatedAt = Date()
+        try check(epoch)
+        try await store.saveOperatorTask(task, expectedEpoch: epoch)
+    }
+
+    private func scheduleOperators(epoch: String) async throws {
+        try check(epoch)
+        let settings = try await store.getSettings() ?? defaultSettings()
+        for var task in try await store.operatorTasks() where task.state == .queued {
+            guard operatorRuns.count < settings.maxConcurrentOperators else { break }
+            guard operatorRuns[task.id] == nil else { continue }
+            if task.mode == .computer && computerOwner != nil { continue }
+            let trusted = try await store.trustedConversation()
+            guard task.chatGuid == trusted?.chatGuid, normalizeHandle(task.senderHandle) == normalizeHandle(trusted?.senderHandle ?? ""),
+                  task.workspace == settings.workspaceRoot, task.permission == settings.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")) else {
+                task.state = .cancelled; try await store.saveOperatorTask(task, expectedEpoch: epoch); continue
+            }
+            try check(epoch)
+            task.state = .running
+            try await store.saveOperatorTask(task, expectedEpoch: epoch, expectedRunID: task.runID)
+            try check(epoch)
+            if task.mode == .computer { computerOwner = task.id }
+            let launched = task
+            operatorRuns[task.id] = Task { await self.runOperator(launched, settings: settings, epoch: epoch) }
+        }
+    }
+
+    private func runOperator(_ launched: OperatorTaskRecord, settings: Settings, epoch: String) async {
+        var threadID: String?
+        var actionsStarted = false
+        var quiescent = true
+        defer {
+            if let threadID { activeWorkers.removeValue(forKey: threadID) }
+            operatorRuns.removeValue(forKey: launched.id)
+            if quiescent, computerOwner == launched.id { computerOwner = nil }
+            steeringTasks.removeValue(forKey: launched.id)
+            if self.epoch == epoch { scheduleWork() }
+        }
+        do {
+            try check(epoch)
+            let root = URL(fileURLWithPath: launched.workspace).resolvingSymlinksInPath()
+            let artifacts = root.appendingPathComponent(".steve-tasks").appendingPathComponent(launched.id)
+            guard artifacts.resolvingSymlinksInPath().path.hasPrefix(root.path + "/") else { throw RPCError(message: "Task artifact directory is outside the workspace") }
+            try FileManager.default.createDirectory(at: artifacts, withIntermediateDirectories: true)
+            guard artifacts.resolvingSymlinksInPath().path.hasPrefix(root.path + "/") else { throw RPCError(message: "Task artifact directory moved outside the workspace") }
+            let context = StevePromptContext(workspace: launched.workspace, permissionProfile: launched.permission, model: settings.model, effort: settings.effort)
+            let instructions = StevePrompt.workerInstructions(context) + "\n\n" + StevePrompt.operatorOwnership(mode: launched.mode, maxHelpers: settings.maxHelpersPerOperator, artifacts: artifacts.path)
+            let oldID = launched.contextAction == .fresh ? nil : launched.threadID
+            do {
+                threadID = try await codex.operatorThread(threadID: oldID, cwd: launched.workspace, permissionProfile: launched.permission, profile: settings.operatorProfile, instructions: instructions, mode: launched.mode, maxHelpers: settings.maxHelpersPerOperator)
+            } catch {
+                guard oldID != nil, CodexSessionRecovery.shouldReplaceResumedThread(for: error) else { throw error }
+                threadID = try await codex.operatorThread(threadID: nil, cwd: launched.workspace, permissionProfile: launched.permission, profile: settings.operatorProfile, instructions: instructions, mode: launched.mode, maxHelpers: settings.maxHelpersPerOperator)
+            }
+            guard let threadID, var current = try await store.operatorTask(id: launched.id), current.runID == launched.runID, current.state == .running, let first = current.inbound.first else { throw CancellationError() }
+            current.threadID = threadID
+            try await store.saveOperatorTask(current, expectedEpoch: epoch, expectedRunID: launched.runID)
+            if launched.contextAction == .compact { try await codex.compactThread(threadID: threadID) }
+            activeWorkers[threadID] = WorkerBinding(epoch: epoch, threadID: threadID, taskID: launched.id, turnID: nil, message: first)
+            actionsStarted = true
+            quiescent = false
+            let start = Date()
+            let result = try await codex.runTurn(threadID: threadID, text: current.objective, attachmentPaths: current.inbound.flatMap(\.attachmentPaths), workspace: current.workspace,
+                model: settings.model, effort: settings.effort, serviceTier: settings.serviceTier, onTurnStarted: { turnID in
+                    await self.operatorTurnStarted(taskID: launched.id, epoch: epoch, threadID: threadID, turnID: turnID)
+                })
+            try check(epoch)
+            // The owner must join its helpers before a result can be delivered
+            // or the Mac can be handed to a different task.
+            try await codex.stopDescendants(threadID: threadID)
+            quiescent = true
+            activeWorkers.removeValue(forKey: threadID)
+            await steeringTasks[launched.id]?.value
+            let envelope = try AgentEnvelopeParser.workerResult(from: result.text)
+            let verified = try verifiedArtifacts(from: envelope, workspace: launched.workspace, nativeCapturePaths: result.nativeCapturePaths)
+            let accepted = WorkerResultEnvelope(schemaVersion: envelope.schemaVersion, kind: envelope.kind, status: envelope.status, summary: envelope.summary, userQuestion: envelope.userQuestion, artifacts: verified)
+            try await store.updateOperatorTask(id: launched.id, expectedEpoch: epoch, expectedRunID: launched.runID) { task in
+                guard task.state == .running else { throw CancellationError() }
+                task.summary = envelope.summary
+                task.result = accepted
+                if envelope.status == .needsComputer && task.mode == .background {
+                    task.mode = .computer; task.state = .queued
+                    task.objective = "Continue your same task using the connected services and Computer Use now available. Verify current state before actions. Original goal:\n" + task.objective
+                    task.contextAction = .reuse
+                } else {
+                    task.state = .awaitingDelivery
+                }
+            }
+            SteveLog.write("Operator completed mode=\(launched.mode.rawValue) seconds=\(Int(Date().timeIntervalSince(start))) status=\(envelope.status.rawValue)")
+        } catch {
+            if let threadID, self.epoch == epoch {
+                for id in approvals.keys.filter({ approvals[$0]?.binding.threadID == threadID }) { finishApproval(id: id, decision: .cancel) }
+                // Cleanup runs outside the cancelled task so RPC cancellation
+                // cannot suppress the interrupt. A failed stop keeps the lease.
+                let client = codex
+                quiescent = await Task {
+                    do { try await client.quiesceThread(threadID: threadID); try await client.stopDescendants(threadID: threadID); return true }
+                    catch { return false }
+                }.value
+                if !quiescent { transportError = "A task could not be confirmed stopped. Pause and resume Steve before more computer tasks." }
+            }
+            if self.epoch == epoch, !Task.isCancelled,
+               var task = try? await store.operatorTask(id: launched.id), task.runID == launched.runID, task.state == .running {
+                task.state = actionsStarted ? .uncertain : .failed
+                task.summary = actionsStarted ? "The final outcome could not be verified. Actions may have completed; nothing was retried." : "The task could not be started."
+                try? await store.saveOperatorTask(task, expectedEpoch: epoch, expectedRunID: launched.runID)
+                try? await store.finishInbox(task.inbound.map(\.guid), state: task.state.rawValue)
+                if let run = task.scheduledRunID { try? await automation?.recordExecutionOutcome(id: run, outcome: .failed) }
+                if let first = task.inbound.first {
+                    let notice = SteveStore.OutboundPart(id: "outcome:" + task.runID, chatGuid: task.chatGuid, recipient: task.senderHandle, replyTo: first.guid, inboxGUIDs: [], text: task.title + ": " + task.summary, attachmentPath: nil, workspace: task.workspace, permission: task.permission)
+                    try? await store.stageDelivery([notice], inboxGUIDs: [], expectedEpoch: epoch)
+                }
+                SteveLog.write("Operator needs review error=\(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func operatorTurnStarted(taskID: String, epoch: String, threadID: String, turnID: String) async {
+        await turnStarted(epoch: epoch, threadID: threadID, turnID: turnID)
+        guard let task = try? await store.operatorTask(id: taskID) else { return }
+        await flushFollowUps(taskID: taskID, runID: task.runID, epoch: epoch, threadID: threadID, turnID: turnID)
+    }
+
+    private func flushFollowUps(taskID: String, runID: String, epoch: String, threadID: String, turnID: String) async {
+        guard let task = try? await store.operatorTask(id: taskID), task.runID == runID else { return }
+        for update in task.pendingFollowUps ?? [] {
+            do {
+                try check(epoch)
+                try await codex.steerTurn(threadID: threadID, expectedTurnID: turnID, text: update.text, attachmentPaths: update.attachmentPaths)
+                try await store.updateOperatorTask(id: taskID, expectedEpoch: epoch, expectedRunID: runID) { current in
+                    if current.pendingFollowUps?.contains(where: { $0.id == update.id }) == true { current.inbound += update.inbound }
+                    current.pendingFollowUps?.removeAll { $0.id == update.id }
+                }
+            } catch {
+                // The turn may already be finishing. The durable update will
+                // become a continuation after its current result is delivered.
+                return
+            }
+        }
+    }
+
+    private func deliverOperator(_ task: OperatorTaskRecord, epoch: String) async {
+        do {
+            try check(epoch)
+            guard let envelope = task.result, let first = task.inbound.first else { throw AgentEnvelopeError.invalidPayload("Task result is missing") }
+            let settings = try await store.getSettings() ?? defaultSettings()
+            let trusted = try await store.trustedConversation()
+            guard trusted?.chatGuid == task.chatGuid, normalizeHandle(trusted?.senderHandle ?? "") == normalizeHandle(task.senderHandle),
+                  settings.workspaceRoot == task.workspace, settings.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")) == task.permission else { throw CancellationError() }
+            let relay = try await prepareRelay(chatGuid: task.chatGuid, workspace: task.workspace, permission: task.permission, settings: settings, messageGuid: first.guid, epoch: epoch)
+            let profile = try await codex.relayProfile(settings: settings)
+            let artifactSummary = envelope.artifacts.map { ["id": $0.id, "caption": $0.caption ?? "", "mimeType": $0.mimeType ?? ""] }
+            let input = "WORKER_RESULT_JSON:\n\(try encodeJSON(envelope))\n\nTASK_TITLE: \(task.title)\nTASK_ID: \(task.id)\n\nVERIFIED_ARTIFACTS_JSON:\n\(try encodeJSON(artifactSummary))\n\nRECOVERY_ATTEMPTED: true. Deliver this task's verified result; never repeat its execution."
+            let result = try await codex.runTurn(threadID: relay, text: input, attachmentPaths: [], workspace: task.workspace, model: profile.model, effort: profile.effort, serviceTier: profile.serviceTier, onTurnStarted: { _ in })
+            let plan = try AgentEnvelopeParser.deliveryPlan(from: result.text)
+            guard plan.recovery == nil else { throw AgentEnvelopeError.invalidPayload("Completed work cannot be replayed") }
+            guard let current = try await store.operatorTask(id: task.id), current.runID == task.runID, current.state == .awaitingDelivery else { throw CancellationError() }
+            let map = Dictionary(uniqueKeysWithValues: envelope.artifacts.map { ($0.id, $0) })
+            let selected = try plan.attachments.map { item -> (String, String) in
+                guard let artifact = map[item.artifactID] else { throw AgentEnvelopeError.invalidPayload("Unknown task artifact") }
+                return (artifact.path, item.caption ?? artifact.caption ?? "")
+            }
+            try await stage(messages: plan.messages, attachments: selected, inbound: current.inbound, workspace: task.workspace, permission: task.permission, epoch: epoch)
+            try await store.updateOperatorTask(id: task.id, expectedEpoch: epoch, expectedRunID: task.runID) { finished in
+                switch envelope.status {
+                case .completed: finished.state = .completed
+                case .needsClarification: finished.state = .needsClarification
+                case .blocked, .needsComputer: finished.state = .blocked
+                case .failed: finished.state = .failed
+                }
+                if let followUps = finished.pendingFollowUps, !followUps.isEmpty {
+                    finished.state = .queued
+                    finished.objective = "Continue with these user follow-ups. Your earlier result was delivered; inspect current state and do not repeat completed actions.\n" + followUps.map(\.text).joined(separator: "\n\n")
+                    finished.inbound = followUps.flatMap(\.inbound)
+                    finished.pendingFollowUps = []
+                    finished.result = nil
+                    finished.runID = UUID().uuidString
+                    finished.contextAction = .reuse
+                }
+            }
+            if let run = task.scheduledRunID { try await automation?.recordExecutionOutcome(id: run, outcome: envelope.status == .completed ? .succeeded : .failed) }
+            try await store.finishAgentSession(chatGuid: task.chatGuid, messageGuid: first.guid, state: "idle", expectedEpoch: epoch)
+        } catch {
+            guard self.epoch == epoch, !Task.isCancelled else { return }
+            var failed = task; failed.state = .uncertain
+            try? await store.saveOperatorTask(failed, expectedEpoch: epoch, expectedRunID: task.runID)
+            try? await store.finishInbox(task.inbound.map(\.guid), state: "uncertain")
+            if let first = task.inbound.first {
+                let notice = SteveStore.OutboundPart(id: "delivery-outcome:" + task.runID, chatGuid: task.chatGuid, recipient: task.senderHandle, replyTo: first.guid, inboxGUIDs: [], text: "I finished working on \(task.title), but couldn't prepare its reply. I haven't repeated the task.", attachmentPath: nil, workspace: task.workspace, permission: task.permission)
+                try? await store.stageDelivery([notice], inboxGUIDs: [], expectedEpoch: epoch)
+            }
+            SteveLog.write("Operator delivery requires review error=\(error.localizedDescription)")
+        }
+    }
+
+    private func cancelOperator(id: String, inbound: [SteveInboundMessage], workspace: String, permission: String, epoch: String) async throws {
+        guard let first = inbound.first, var task = try await store.operatorTask(id: id), task.chatGuid == first.chatGuid,
+              normalizeHandle(task.senderHandle) == normalizeHandle(first.senderHandle), task.workspace == workspace, task.permission == permission else { throw RPCError(message: "That task is not in this conversation") }
+        task.state = .cancelled
+        let originalRun = task.runID
+        task.runID = UUID().uuidString
+        try await store.saveOperatorTask(task, expectedEpoch: epoch, expectedRunID: originalRun)
+        let run = operatorRuns[id]
+        if let thread = task.threadID {
+            for id in approvals.keys.filter({ approvals[$0]?.binding.threadID == thread }) { finishApproval(id: id, decision: .cancel) }
+        }
+        run?.cancel()
+        await run?.value
+        if computerOwner == id { throw RPCError(message: "The task's stop could not be verified. Pause and resume Steve before more computer work.") }
+        if run == nil, let thread = task.threadID { try await codex.quiesceThread(threadID: thread); try await codex.stopDescendants(threadID: thread) }
+        try await store.finishInbox(task.inbound.map(\.guid), state: "cancelled")
+        try await stage(messages: ["Stopped \(task.title)."], attachments: [], inbound: inbound, workspace: workspace, permission: permission, epoch: epoch)
+    }
 }

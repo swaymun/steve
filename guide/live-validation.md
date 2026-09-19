@@ -11,6 +11,13 @@ For each scenario, record the installed build identity, start/end time, observed
 | File delivery | Ask for a new text file containing a unique test marker. | Exact bytes in the Mac workspace and the received iMessage attachment. |
 | Browser approval | Request a public HTTPS page through the installed official tool with site approval set to ask. | Scoped approval reaches the phone; explicit decision resolves once; unsupported prompts cancel without inventing a saved user denial. |
 | Browser result | After approval, read the page heading and return a screenshot. | Fresh visible page evidence, readable received image, existing profile preserved. |
+| Concurrent goals | Start substantial public research, then ask an unrelated question and start a second task. | Two distinct task/thread identities, overlapping work, responsive relay, separate correct deliveries. |
+| Task correction and cancel | Correct one active goal, then cancel a named goal while another is running. | Correction reaches its owner; only the named task stops; unrelated work finishes; no stale result replaces the correction. |
+| Shared Mac | Queue two visible-browser tasks alongside research. | Only one computer owner; second GUI task starts after the first becomes quiescent; background research continues. |
+| Research handoff | Ask a background research task to save its findings as a file. | Same task context resumes with verified computer access; original sources remain available; received file matches the workspace. |
+| Model settings | Change the operator profile while a task runs, then start another task. | Existing turn retains its model; new turn uses the selected profile; relay profile remains independent. |
+| Native screenshot | Ask for a screenshot of the observed browser result. | Current-turn native image is selected explicitly, delivered, and visually checked; no upload server or old capture is substituted. |
+| Native helpers | Give an operator a useful independent research subtask. | Actual native spawn/join/close, parent lineage, configured count/depth, no helper shell/desktop/integrations; unsupported versions continue alone. |
 | Pause | Start a harmless multi-step task, then send `/stop`. | Prompt cancellation; no later unapproved action or stale artifact delivery. |
 | Restart | Restart with queued work and with a deliberately interrupted test operation. | Queued work survives; ambiguous effects are reported and never automatically replayed. |
 | Preference | Explicitly save a harmless formatting preference, inspect it, then forget it. | Persistence across restart and absence after forgetting; no inferred fact or credential stored. |

@@ -20,6 +20,7 @@ struct SteveControlResponse: Codable, Sendable {
     let summary: String
     var checks: [SteveSetupCheck] = []
     var values: [String: String] = [:]
+    var tasks: [OperatorTaskSummary]? = nil
 }
 
 /// Local CLI requests execute inside the user-session app, which owns TCC
@@ -50,7 +51,9 @@ enum SteveControl {
             case "start": try await runtime.setPaused(false)
             case "stop": try await runtime.setPaused(true)
             case "setup":
-                let allowed: Set<String> = ["workspace", "permission", "model", "effort", "service-tier", "login", "pair", "tailscale-connect", "phone-access", "open-permission"]
+                let agentOptions: Set<String> = ["model", "effort", "service-tier", "relay-model", "relay-effort", "relay-service-tier", "max-operators", "max-helpers"]
+                let allowed = Set(["workspace", "permission", "login", "pair", "tailscale-connect", "phone-access", "open-permission"])
+                    .union(agentOptions)
                 guard Set(request.options.keys).isSubset(of: allowed) else {
                     throw RPCError(message: "Unknown setup option; no changes were applied.")
                 }
@@ -76,15 +79,34 @@ enum SteveControl {
                 if let value = request.options["effort"], !snapshot.models.contains(where: { $0.id == selected && $0.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == value }) }) {
                     throw RPCError(message: "Reasoning effort is not supported by the selected model.")
                 }
+                if let value = request.options["relay-model"], value != "auto", !snapshot.models.contains(where: { $0.id == value }) {
+                    throw RPCError(message: "Relay model is not in the signed-in account's current catalog.")
+                }
+                if let value = request.options["relay-service-tier"], SteveServiceTier(rawValue: value) == nil {
+                    throw RPCError(message: "Choose standard or fast for relay service tier.")
+                }
+                let requestedRelay = request.options["relay-model"]
+                let relaySelected = requestedRelay == "auto" ? nil : (requestedRelay ?? snapshot.settings.relayModel)
+                let relayEffective = relaySelected ?? (snapshot.models.contains(where: { $0.id == "gpt-5.6-luna" }) ? "gpt-5.6-luna" : selected)
+                if let value = request.options["relay-effort"], !snapshot.models.contains(where: { $0.id == relayEffective && $0.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == value }) }) {
+                    throw RPCError(message: "Relay reasoning effort is not supported by the selected relay model.")
+                }
+                if let value = request.options["max-operators"], Int(value).map({ (1...4).contains($0) }) != true {
+                    throw RPCError(message: "Maximum operators must be an integer from 1 through 4.")
+                }
+                if let value = request.options["max-helpers"], Int(value).map({ (0...2).contains($0) }) != true {
+                    throw RPCError(message: "Maximum helpers must be an integer from 0 through 2.")
+                }
                 if let value = request.options["workspace"] {
                     guard value.hasPrefix("/"), !value.contains("\0") else { throw RPCError(message: "Workspace must be an absolute path.") }
-                    try await runtime.configureWorkspace(value)
-                    applied.append("workspace")
                 }
+                if let value = request.options["workspace"] { try await runtime.configureWorkspace(value); applied.append("workspace") }
                 if let value = request.options["permission"] { try await runtime.selectPermission(value); applied.append("permission") }
-                if let value = request.options["model"] { try await runtime.selectModel(value); applied.append("model") }
-                if let value = request.options["effort"] { try await runtime.selectEffort(value); applied.append("effort") }
-                if let value = request.options["service-tier"] { try await runtime.selectServiceTier(value); applied.append("service-tier") }
+                let requestedAgentOptions = request.options.filter { agentOptions.contains($0.key) }
+                if !requestedAgentOptions.isEmpty {
+                    try await runtime.configureAgentSettings(options: requestedAgentOptions)
+                    applied.append(contentsOf: requestedAgentOptions.keys.sorted())
+                }
                 if request.options["login"] == "true" {
                     let login = try await runtime.loginStart()
                     values["authURL"] = login.authURL
@@ -129,7 +151,18 @@ enum SteveControl {
                 checks.append(messagesCheck(accounts: accounts, watcher: snapshot.dependencies.first { $0.name == "messages" }))
             }
             let state = readiness(checks)
-            return SteveControlResponse(state: state, summary: snapshot.status.detail.isEmpty ? (snapshot.paused ? "Steve is paused." : "Steve is running.") : snapshot.status.detail, checks: checks, values: values)
+            values.merge([
+                "relayModel": snapshot.settings.relayModel ?? "auto",
+                "relayEffort": snapshot.settings.relayEffort,
+                "relayServiceTier": snapshot.settings.relayServiceTier.rawValue,
+                "operatorModel": snapshot.settings.model,
+                "operatorEffort": snapshot.settings.effort,
+                "operatorServiceTier": snapshot.settings.serviceTier.rawValue,
+                "maxOperators": String(snapshot.settings.maxConcurrentOperators),
+                "maxHelpers": String(snapshot.settings.maxHelpersPerOperator),
+                "nativeHelpers": snapshot.nativeHelpersAvailable.map { $0 ? "available" : "unavailable" } ?? "unverified"
+            ]) { _, current in current }
+            return SteveControlResponse(state: state, summary: snapshot.status.detail.isEmpty ? (snapshot.paused ? "Steve is paused." : "Steve is running.") : snapshot.status.detail, checks: checks, values: values, tasks: snapshot.tasks)
         } catch {
             return SteveControlResponse(state: "failed", summary: error.localizedDescription, values: applied.isEmpty ? [:] : ["applied": applied.joined(separator: ","), "nextStep": "These settings were saved before the later step failed. Run status and resume the remaining setup step."])
         }

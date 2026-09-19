@@ -55,7 +55,9 @@ private actor FixtureCodex: GatewayCodexClient {
     var inputs: [String] = []
     var startTiers: [String] = []
     var resumeTiers: [String] = []
+    var resumedThreadIDs: [String] = []
     var turnTiers: [SteveServiceTier] = []
+    var threadInstructions: [(role: String, text: String)] = []
     var turns = 0
     var activeTurns = 0
     var stops = 0
@@ -84,9 +86,9 @@ private actor FixtureCodex: GatewayCodexClient {
     init(_ results: [String]) { self.results = results }
     func hold() { holdWorker = true }
     func stop() { stops += 1 }
-    func startThread(cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool, serviceTier: SteveServiceTier) -> String { startTiers.append((isRelay ? "relay:" : "worker:") + serviceTier.rawValue); return UUID().uuidString }
+    func startThread(cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool, serviceTier: SteveServiceTier) -> String { let role = isRelay ? "relay" : "worker"; startTiers.append(role + ":" + serviceTier.rawValue); threadInstructions.append((role, developerInstructions)); return UUID().uuidString }
     func resumeThread(threadID: String, cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool, serviceTier: SteveServiceTier) throws {
-        resumeTiers.append((isRelay ? "relay:" : "worker:") + serviceTier.rawValue)
+        let role = isRelay ? "relay" : "worker"; resumeTiers.append(role + ":" + serviceTier.rawValue); resumedThreadIDs.append(threadID); threadInstructions.append((role, developerInstructions))
         if !isRelay, let workerResumeError { throw RPCError(message: workerResumeError) }
     }
     func compactThread(threadID: String) {}
@@ -109,7 +111,7 @@ private actor FixtureCodex: GatewayCodexClient {
     }
 }
 final class GatewayLifecycleTests: XCTestCase {
-    private let relay = #"{"schemaVersion":1,"kind":"relay_request","action":"execute","workerPrompt":"Do the fixture action"}"#
+    private let relay = #"{"schemaVersion":1,"kind":"relay_request","action":"execute","mode":"computer","taskTitle":"Fixture task","workerPrompt":"Do the fixture action"}"#
     private let worker = #"{"schemaVersion":1,"kind":"worker_result","status":"completed","summary":"Done","artifacts":[]}"#
     private func inbound(_ id: String = UUID().uuidString, text: String = "Do a task") -> SteveInboundMessage {
         .init(guid: id, chatGuid: "chat", senderHandle: "user@example.test", text: text, isFromMe: false, isGroup: false, attachmentPaths: [], replyToGuid: nil, rowID: 42)
@@ -172,21 +174,21 @@ final class GatewayLifecycleTests: XCTestCase {
         await gateway.receive(inbound("standard-tier"))
         try await eventually { try await store.queueState("inbound:standard-tier") == "completed" }
         let starts = await codex.startTiers, resumes = await codex.resumeTiers, turns = await codex.turnTiers
-        XCTAssertEqual(Set(starts), Set(["relay:fast", "worker:fast"]))
-        XCTAssertEqual(Set(resumes), Set(["relay:standard", "worker:standard"]))
-        XCTAssertEqual(turns, [.fast, .fast, .fast, .standard, .standard, .standard])
+        XCTAssertEqual(starts, ["relay:standard", "worker:fast", "worker:standard"])
+        XCTAssertEqual(Set(resumes), ["relay:standard"])
+        XCTAssertFalse(resumes.contains(where: { $0.hasPrefix("worker:") }))
+        XCTAssertEqual(turns, [.standard, .fast, .standard, .standard, .standard, .standard])
     }
     func testRuntimeCapabilitiesReachBothTurnsAndQuoteExactExecutable() async throws {
-        let (_, gateway, messages, codex) = try await setup([relay, worker])
+        let plan = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Done"],"attachments":[]}"#
+        let (_, gateway, messages, codex) = try await setup([relay, worker, plan])
         await gateway.start(); await gateway.receive(inbound("capability-task"))
         try await eventually { await messages.sent.count > 0 }
-        let inputs = await codex.inputs
-        XCTAssertGreaterThanOrEqual(inputs.count, 2)
-        for input in inputs.prefix(2) {
-            XCTAssertTrue(input.contains(Bundle.main.executableURL!.path))
-            XCTAssertTrue(input.contains("video start --demonstration"))
-            XCTAssertTrue(input.contains("Do not scan /Users"))
-        }
+        let instructions = await codex.threadInstructions
+        let workerInstructions = try XCTUnwrap(instructions.first(where: { $0.role == "worker" })?.text)
+        XCTAssertTrue(workerInstructions.contains(Bundle.main.executableURL!.path))
+        XCTAssertTrue(workerInstructions.contains("video start --demonstration"))
+        XCTAssertTrue(workerInstructions.contains("Do not scan /Users"))
         var context = StevePromptContext(workspace: "/tmp", permissionProfile: "read-only", model: "fixture", effort: "low")
         context.executablePath = "/Applications/Steve's App.app/Contents/MacOS/Steve"
         XCTAssertTrue(StevePrompt.runtimeCapabilities(context).contains("'\"'\"'"))
@@ -412,7 +414,55 @@ final class GatewayLifecycleTests: XCTestCase {
         XCTAssertTrue(inputs[1].hasPrefix("USER_REQUEST_FORMAT_CORRECTION:"))
         XCTAssertTrue(inputs[1].contains("USER_REQUEST:\n" + quote))
     }
-    func testControlAfterUnusedWorkerResumeFailureReplacesOnlyWorker() async throws {
+    func testMissingNewTaskRoutingFieldsGetsOneCorrectionInsteadOfDefaults() async throws {
+        let missing = #"{"schemaVersion":1,"kind":"relay_request","action":"execute","workerPrompt":"Do the fixture action"}"#
+        let plan = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Done"],"attachments":[]}"#
+        let (store, gateway, messages, codex) = try await setup([missing, relay, worker, plan])
+        await gateway.start(); await gateway.receive(inbound("missing-routing"))
+        try await eventually { try await store.queueState("inbound:missing-routing") == "completed" }
+        let inputs = await codex.inputs
+        let tasks = try await store.operatorTasks(chatGuid: "chat")
+        XCTAssertEqual(inputs.count, 4)
+        XCTAssertTrue(inputs[1].hasPrefix("USER_REQUEST_FORMAT_CORRECTION:"))
+        XCTAssertEqual(inputs.filter { $0.hasPrefix("USER_REQUEST_FORMAT_CORRECTION:") }.count, 1)
+        XCTAssertEqual(tasks.count, 1)
+        XCTAssertEqual(tasks.first?.title, "Fixture task")
+        XCTAssertEqual(tasks.first?.mode, .computer)
+        let sent = await messages.sent
+        XCTAssertEqual(sent, ["Done"])
+    }
+    func testOldRelayContractStartsOneReplacementAndRetainsLegacyWorkerWithoutReplay() async throws {
+        let plan = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Done"],"attachments":[]}"#
+        let (store, gateway, messages, codex) = try await setup([relay, worker, plan])
+        let storedSettings = try await store.getSettings()
+        let settings = try XCTUnwrap(storedSettings)
+        let original = SteveStore.AgentSession(chatGuid: "chat", threadID: "legacy-worker", relayThreadID: "legacy-relay", relayPromptVersion: "relay-v12-old",
+            workspacePath: try XCTUnwrap(settings.workspaceRoot), permissionProfile: "workspace-write", model: settings.model, effort: settings.effort,
+            lastMessageGuid: "legacy-message", executionState: "idle", updatedAt: Date())
+        try await store.saveAgentSession(original)
+
+        await gateway.start(); await gateway.receive(inbound("contract-upgrade"))
+        try await eventually { try await store.queueState("inbound:contract-upgrade") == "completed" }
+        let starts = await codex.startTiers
+        let resumes = await codex.resumeTiers
+        let resumedThreadIDs = await codex.resumedThreadIDs
+        let tasks = try await store.operatorTasks(chatGuid: "chat")
+        let storedSession = try await store.agentSession(for: "chat")
+        let session = try XCTUnwrap(storedSession)
+        XCTAssertEqual(starts.filter { $0.hasPrefix("relay:") }.count, 1)
+        XCTAssertEqual(starts.filter { $0.hasPrefix("worker:") }.count, 1)
+        XCTAssertFalse(resumedThreadIDs.contains("legacy-relay"), "The stale relay contract must never resume")
+        XCTAssertFalse(resumedThreadIDs.contains("legacy-worker"), "Migrating a legacy worker must not replay it")
+        XCTAssertEqual(resumes.filter { $0.hasPrefix("relay:") }.count, 1, "The replacement relay may be resumed only for its delivery turn")
+        XCTAssertEqual(tasks.filter { $0.threadID == "legacy-worker" }.count, 1)
+        XCTAssertEqual(tasks.first(where: { $0.threadID == "legacy-worker" })?.state, .completed)
+        XCTAssertEqual(tasks.count, 2)
+        XCTAssertNotEqual(session.relayThreadID, "legacy-relay")
+        XCTAssertEqual(session.relayPromptVersion, StevePrompt.relayPromptVersion)
+        let sent = await messages.sent
+        XCTAssertEqual(sent, ["Done"])
+    }
+    func testControlRequestsReuseRelayWithoutStartingAnOperator() async throws {
         let control = #"{"schemaVersion":1,"kind":"relay_request","action":"control","control":{"operation":"schedule_list","userQuote":"List my schedules"}}"#
         let (store, gateway, messages, codex) = try await setup([control, control], withAutomation: true)
         await gateway.start(); await gateway.receive(inbound("first-control", text: "List my schedules"))
@@ -425,34 +475,39 @@ final class GatewayLifecycleTests: XCTestCase {
         let secondValue = try await store.agentSession(for: "chat")
         let second = try XCTUnwrap(secondValue)
         let starts = await codex.startTiers, turns = await codex.turns, sent = await messages.sent
-        XCTAssertNotEqual(first.threadID, second.threadID)
+        XCTAssertTrue(first.threadID.isEmpty)
+        XCTAssertTrue(second.threadID.isEmpty)
         XCTAssertEqual(first.relayThreadID, second.relayThreadID)
-        XCTAssertEqual(starts.filter { $0.hasPrefix("worker:") }.count, 2)
+        XCTAssertEqual(starts.filter { $0.hasPrefix("worker:") }.count, 0)
         XCTAssertEqual(starts.filter { $0.hasPrefix("relay:") }.count, 1)
         XCTAssertEqual(turns, 2); XCTAssertEqual(sent.count, 2)
         XCTAssertEqual(second.executionState, "idle")
     }
     func testUnknownWorkerResumeFailureDoesNotStartReplacementOrReplay() async throws {
-        // This test exercises a resumed pair, not schedule creation/delivery.
-        // Seed that durable precondition rather than racing startup scheduling
-        // and waiting for an unrelated control's outbound confirmation first.
-        let (store, gateway, _, codex) = try await setup([])
+        let taskID = "existing-task"
+        let request = #"{"schemaVersion":1,"kind":"relay_request","action":"execute","workerPrompt":"Continue without replaying prior work","taskID":"existing-task"}"#
+        let (store, gateway, _, codex) = try await setup([request])
         let settingsValue = try await store.getSettings()
         let settings = try XCTUnwrap(settingsValue)
         let original = SteveStore.AgentSession(chatGuid: "chat", threadID: "existing-worker", relayThreadID: "existing-relay", relayPromptVersion: StevePrompt.relayPromptVersion,
             workspacePath: try XCTUnwrap(settings.workspaceRoot), permissionProfile: "workspace-write", model: settings.model, effort: settings.effort,
             lastMessageGuid: "original-control", executionState: "idle", updatedAt: Date())
         try await store.saveAgentSession(original)
-        await codex.failWorkerResume("Codex App Server request failed (-32600)")
         await gateway.start()
+        let storedEpoch = try await store.gatewayEpoch()
+        let epoch = try XCTUnwrap(storedEpoch)
+        let existing = OperatorTaskRecord(id: taskID, chatGuid: "chat", senderHandle: "user@example.test", workspace: try XCTUnwrap(settings.workspaceRoot), permission: "workspace-write", title: "Existing task", objective: "Earlier work", threadID: "existing-worker", mode: .computer, state: .completed, inbound: [], runID: "earlier-run", summary: "Earlier result")
+        try await store.saveOperatorTask(existing, expectedEpoch: epoch)
+        await codex.failWorkerResume("Codex App Server request failed (-32600)")
         await gateway.receive(inbound("unknown-resume", text: "List my schedules"))
         try await eventually { try await store.queueState("inbound:unknown-resume") == "failed" }
         let starts = await codex.startTiers, turns = await codex.turns, resumes = await codex.resumeTiers
-        let retained = try await store.agentSession(for: "chat")
-        XCTAssertEqual(resumes, ["worker:standard"])
-        XCTAssertTrue(starts.isEmpty); XCTAssertEqual(turns, 0)
-        XCTAssertEqual(retained?.threadID, original.threadID)
-        XCTAssertEqual(retained?.relayThreadID, original.relayThreadID)
+        let retained = try await store.operatorTask(id: taskID)
+        XCTAssertEqual(resumes, ["relay:standard", "worker:standard"])
+        XCTAssertTrue(starts.isEmpty); XCTAssertEqual(turns, 1, "Only relay routing runs; the failed operator resume is never replayed")
+        XCTAssertEqual(retained?.threadID, "existing-worker")
+        XCTAssertNotEqual(retained?.runID, "earlier-run")
+        XCTAssertEqual(retained?.summary, "The task could not be started.")
     }
     func testSuccessfulScheduleControlDeliversCreatedIdentifierAndSettlesSession() async throws {
         let quote = "Remind me every Friday at 4 pm America/Chicago to review tasks and tell me its identifier"
@@ -546,8 +601,9 @@ final class GatewayLifecycleTests: XCTestCase {
         try await eventually { try await store.queueState("inbound:bad") == "uncertain" }
         let turns = await codex.turns, sent = await messages.sent
         XCTAssertEqual(turns, 2); XCTAssertFalse(sent.contains("Success"))
-        let session = try await store.agentSession(for: "chat")
-        XCTAssertEqual(session?.executionState, "uncertain")
+        let tasks = try await store.operatorTasks(chatGuid: "chat")
+        XCTAssertEqual(tasks.count, 1)
+        XCTAssertEqual(tasks.first?.state, .uncertain)
     }
     func testUnknownAttachmentRejectsWholeDeliveryBeforeText() async throws {
         let plan = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Success"],"attachments":[{"artifactID":"missing"}]}"#
@@ -556,6 +612,35 @@ final class GatewayLifecycleTests: XCTestCase {
         try await eventually { try await store.queueState("inbound:unknown") == "uncertain" }
         let sent = await messages.sent, turns = await codex.turns
         XCTAssertFalse(sent.contains("Success")); XCTAssertEqual(turns, 3)
+    }
+    func testNativeCaptureRequiresExplicitSelectionAndCurrentTurnEvidence() async throws {
+        let (store, gateway, _, _) = try await setup([])
+        let root = store.databaseURL.deletingLastPathComponent()
+        let first = root.appendingPathComponent("first.png"), last = root.appendingPathComponent("last.jpg")
+        try Data([1]).write(to: first); try Data([2]).write(to: last)
+        let selected = WorkerResultEnvelope(schemaVersion: 1, kind: "worker_result", status: .completed, summary: "Observed screenshot", userQuestion: nil,
+            artifacts: [.init(id: "shot", path: AgentProtocol.lastNativeCapture, caption: "Final task state", mimeType: nil)])
+        XCTAssertNoThrow(try selected.validate())
+        let artifacts = try await gateway.verifiedArtifacts(from: selected, workspace: root.path, nativeCapturePaths: [first.path, last.path])
+        XCTAssertEqual(artifacts.map(\.path), [last.resolvingSymlinksInPath().path])
+        XCTAssertEqual(artifacts.first?.mimeType, "image/jpeg")
+        let empty = WorkerResultEnvelope(schemaVersion: 1, kind: "worker_result", status: .completed, summary: "No image requested", userQuestion: nil, artifacts: [])
+        let unselected = try await gateway.verifiedArtifacts(from: empty, workspace: root.path, nativeCapturePaths: [last.path])
+        XCTAssertTrue(unselected.isEmpty)
+        do {
+            _ = try await gateway.verifiedArtifacts(from: selected, workspace: root.path)
+            XCTFail("A missing current-turn capture must not select a workspace image")
+        } catch {}
+        let outside = root.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".png")
+        try Data([3]).write(to: outside)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        do {
+            _ = try await gateway.verifiedArtifacts(from: selected, workspace: root.path, nativeCapturePaths: [outside.path])
+            XCTFail("Capture selection must preserve the workspace boundary")
+        } catch {}
+        let invalidReference = WorkerResultEnvelope(schemaVersion: 1, kind: "worker_result", status: .completed, summary: "Invalid", userQuestion: nil,
+            artifacts: [.init(id: "shot", path: "steve-capture:other", caption: nil, mimeType: nil)])
+        XCTAssertThrowsError(try invalidReference.validate())
     }
     func testPauseCancelsWorkerAndSharesPersistedState() async throws {
         let (store, gateway, messages, codex) = try await setup([relay, worker])
@@ -644,10 +729,13 @@ final class GatewayLifecycleTests: XCTestCase {
     func testUncertainWorkerGetsOneDurableNoticeWithoutClearingUncertainty() async throws {
         let (store, gateway, messages, _) = try await setup([relay, "malformed"])
         await gateway.start(); await gateway.receive(inbound("notice"))
-        try await eventually { try await store.queueState("outcome:notice") == "sent" }
+        try await eventually { try await store.operatorTasks(chatGuid: "chat").first?.state == .uncertain }
+        let tasks = try await store.operatorTasks(chatGuid: "chat")
+        let task = try XCTUnwrap(tasks.first)
+        try await eventually { try await store.queueState("outcome:\(task.runID)") == "sent" }
         let state = try await store.queueState("inbound:notice"), sent = await messages.sent
         XCTAssertEqual(state, "uncertain"); XCTAssertEqual(sent.count, 1)
-        XCTAssertTrue(sent[0].contains("haven't retried"))
+        XCTAssertTrue(sent[0].contains("nothing was retried"))
     }
     func testStatusDeliversWhileWorkerIsSuspended() async throws {
         let (_, gateway, messages, codex) = try await setup([relay, worker])

@@ -334,6 +334,44 @@ final class CodexRPCConnectionTests: XCTestCase {
         XCTAssertEqual(response?["acknowledged"], true)
     }
 
+    func testCancellingOneWaitWakesItWithoutStoppingAnotherTurn() async throws {
+        let rpc = connection(#"""
+        read -r first
+        printf '%s\n' '{"id":1,"result":{}}'
+        read -r second
+        printf '%s\n' '{"id":2,"result":{}}' '{"method":"turn/completed","params":{"threadId":"other","turn":{"id":"v","status":"completed"}}}'
+        read -r hold
+        """#)
+        defer { rpc.stop() }
+        _ = try rpc.request(method: "fixture")
+        let waiting = Task { try await rpc.waitForTurn(threadID: "cancelled", turnID: "u") }
+        rpc.cancelWait(threadID: "cancelled", turnID: "u")
+        do { _ = try await waiting.value; XCTFail("Cancelled wait must fail") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertTrue(rpc.isRunning)
+        _ = try rpc.requestWhileStreaming(method: "fixture")
+        _ = try await rpc.waitForTurn(threadID: "other", turnID: "v")
+        XCTAssertTrue(rpc.isRunning)
+    }
+
+    func testUnownedHelperEventsCannotExhaustParentEventBuffer() async throws {
+        let rpc = CodexRPCConnection(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", #"""
+        read -r first
+        printf '%s\n' '{"id":1,"result":{}}'
+        i=0
+        while [ "$i" -lt 21000 ]; do
+          printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"helper","turnId":"child-turn","itemId":"i","delta":"x"}}'
+          i=$((i+1))
+        done
+        printf '%s\n' '{"method":"turn/completed","params":{"threadId":"parent","turn":{"id":"u","status":"completed"}}}'
+        read -r hold
+        """#], responseTimeout: 2, eventTimeout: 10, filterUnownedEvents: true)
+        defer { rpc.stop() }
+        _ = try rpc.request(method: "turn/start", params: ["threadId": "parent"])
+        _ = try await rpc.waitForTurn(threadID: "parent", turnID: "u")
+        XCTAssertTrue(rpc.isRunning)
+    }
+
     func testFailedTurnCannotReturnPriorAgentTextAsSuccess() async throws {
         let rpc = connection(#"""
         read -r first

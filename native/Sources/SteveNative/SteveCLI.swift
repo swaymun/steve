@@ -12,7 +12,10 @@ enum SteveCLI {
       steve video stop RECORDING_ID [--json]
       steve video cancel [--json]
       setup [--workspace /absolute/path] [--permission PROFILE]
-            [--model ID] [--effort EFFORT] [--service-tier standard|fast] [--login] [--pair] [--tailscale-connect] [--phone-access]
+            [--model ID] [--effort EFFORT] [--service-tier standard|fast]
+            [--relay-model auto|ID] [--relay-effort EFFORT] [--relay-service-tier standard|fast]
+            [--max-operators 1...4] [--max-helpers 0...2]
+            [--login] [--pair] [--tailscale-connect] [--phone-access]
       setup --open-permission TARGET [--json] [--non-interactive]
         TARGET: full-disk-access, messages-automation,
                 computer-use-screen-recording, computer-use-accessibility,
@@ -74,7 +77,8 @@ enum SteveCLI {
             case "--login", "--pair", "--tailscale-connect", "--phone-access":
                 guard command == "setup" else { throw RPCError(message: "\(arg) is a setup option.") }
                 request.options[String(arg.dropFirst(2))] = "true"
-            case "--workspace", "--permission", "--model", "--effort", "--service-tier":
+            case "--workspace", "--permission", "--model", "--effort", "--service-tier",
+                 "--relay-model", "--relay-effort", "--relay-service-tier", "--max-operators", "--max-helpers":
                 guard command == "setup", index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else { throw RPCError(message: "\(arg) requires a value on setup.") }
                 index += 1
                 request.options[String(arg.dropFirst(2))] = arguments[index]

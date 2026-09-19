@@ -132,6 +132,11 @@ actor SteveStore {
               permission_profile TEXT NOT NULL, model TEXT NOT NULL, effort TEXT NOT NULL,
               last_message_guid TEXT, execution_state TEXT NOT NULL, updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS operator_tasks (
+              id TEXT PRIMARY KEY, chat_guid TEXT NOT NULL, state TEXT NOT NULL,
+              payload_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS operator_tasks_chat_state ON operator_tasks(chat_guid, state, created_at);
             INSERT INTO metadata(key, value) VALUES ('schema_version', '1')
               ON CONFLICT(key) DO UPDATE SET value = excluded.value;
             """)
@@ -151,6 +156,50 @@ actor SteveStore {
 
     func saveSettings(_ settings: Settings) throws {
         try putJSON(settings, key: "settings")
+    }
+
+    func operatorTasks(chatGuid: String? = nil) throws -> [OperatorTaskRecord] {
+        let rows = try connection.prepare("SELECT payload_json, state FROM operator_tasks WHERE (? IS NULL OR chat_guid = ?) ORDER BY created_at, rowid", chatGuid, chatGuid)
+        return try rows.map { row in
+            guard let raw = row[0] as? String, let state = (row[1] as? String).flatMap(OperatorTaskState.init(rawValue:)) else { throw RPCError(message: "Invalid operator task record") }
+            var task = try decoder.decode(OperatorTaskRecord.self, from: Data(raw.utf8))
+            task.state = state
+            return task
+        }
+    }
+
+    func operatorTask(id: String) throws -> OperatorTaskRecord? {
+        guard let row = try connection.prepare("SELECT payload_json, state FROM operator_tasks WHERE id = ?", id).makeIterator().next(),
+              let raw = row[0] as? String, let state = (row[1] as? String).flatMap(OperatorTaskState.init(rawValue:)) else { return nil }
+        var task = try decoder.decode(OperatorTaskRecord.self, from: Data(raw.utf8)); task.state = state
+        return task
+    }
+
+    func saveOperatorTask(_ task: OperatorTaskRecord, expectedEpoch: String, expectedRunID: String? = nil) throws {
+        try connection.transaction(.immediate) {
+            guard try gatewayEpoch() == expectedEpoch else { throw CancellationError() }
+            if let expectedRunID, try operatorTask(id: task.id)?.runID != expectedRunID { throw CancellationError() }
+            let raw = String(decoding: try encoder.encode(task), as: UTF8.self)
+            try connection.run("""
+                INSERT INTO operator_tasks(id, chat_guid, state, payload_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET state=excluded.state, payload_json=excluded.payload_json, updated_at=excluded.updated_at
+                """, task.id, task.chatGuid, task.state.rawValue, raw,
+                Self.dateFormatter.string(from: task.createdAt), Self.dateFormatter.string(from: Date()))
+        }
+    }
+
+    @discardableResult
+    func updateOperatorTask(id: String, expectedEpoch: String, expectedRunID: String, _ update: @Sendable (inout OperatorTaskRecord) throws -> Void) throws -> OperatorTaskRecord {
+        var result: OperatorTaskRecord!
+        try connection.transaction(.immediate) {
+            guard try gatewayEpoch() == expectedEpoch, var task = try operatorTask(id: id), task.runID == expectedRunID else { throw CancellationError() }
+            try update(&task)
+            task.updatedAt = Date()
+            let raw = String(decoding: try encoder.encode(task), as: UTF8.self)
+            try connection.run("UPDATE operator_tasks SET state = ?, payload_json = ?, updated_at = ? WHERE id = ?", task.state.rawValue, raw, Self.dateFormatter.string(from: task.updatedAt), id)
+            result = task
+        }
+        return result
     }
 
     func trustedConversation() throws -> TrustedConversation? {
@@ -368,6 +417,7 @@ actor SteveStore {
 
     func recoverInterruptedWork() throws {
         try connection.transaction {
+            try connection.run("UPDATE operator_tasks SET state = 'uncertain' WHERE state IN ('running', 'awaitingDelivery')")
             try connection.run("UPDATE queue SET state = 'uncertain' WHERE direction = 'inbound' AND state = 'running'")
             try connection.run("UPDATE queue SET state = 'uncertain' WHERE direction = 'outbound' AND state = 'sending'")
             for part in try queuePayloads(OutboundPart.self, direction: "outbound", state: "uncertain") {
@@ -379,6 +429,8 @@ actor SteveStore {
 
     func invalidateWork(cancelQueued: Bool, epoch: String) throws {
         try connection.transaction {
+            try connection.run("UPDATE operator_tasks SET state = 'interrupted' WHERE state = 'running'")
+            if cancelQueued { try connection.run("UPDATE operator_tasks SET state = 'cancelled' WHERE state IN ('queued', 'awaitingDelivery')") }
             try saveGatewayEpoch(epoch)
             try connection.run("UPDATE queue SET state = 'interrupted' WHERE direction = 'inbound' AND state = 'running'")
             if cancelQueued {
