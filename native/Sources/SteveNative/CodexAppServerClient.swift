@@ -1365,7 +1365,7 @@ actor CodexAppServerClient {
         let currentLifecycle = lifecycle
         let task = Task {
             _ = try await self.request("initialize", params: [
-                "clientInfo": ["name": "steve", "version": "0.1.1"],
+                "clientInfo": ["name": "steve", "version": "0.1.2"],
                 "capabilities": ["experimentalApi": true]
             ])
             try Task.checkCancellation()

@@ -51,8 +51,24 @@ actor MessagesService {
             return value
         } catch {
             SteveLog.write("Messages database open failed path=\(databasePath) error=\(error.localizedDescription)")
-            throw ServiceError.database(error.localizedDescription)
+            throw Self.databaseError(error)
         }
+    }
+
+    static func databaseError(_ error: Error) -> ServiceError {
+        // IMsgCore also wraps a missing/unopenable file as permissionDenied.
+        // Preserve the underlying failure unless it actually reports denial.
+        let underlying: Error
+        if case IMsgError.permissionDenied(_, let cause) = error { underlying = cause }
+        else { underlying = error }
+        // SQLite.Result supplies its useful message through description, not
+        // LocalizedError; localizedDescription would discard the actual cause.
+        let detail = (underlying as? LocalizedError)?.errorDescription ?? String(describing: underlying)
+        let text = detail.lowercased()
+        if ["authorization denied", "permission denied", "operation not permitted"].contains(where: text.contains) {
+            return .permission(detail)
+        }
+        return .database(detail)
     }
 
     static func normalizedAccountAddress(_ raw: String) -> String {

@@ -8,6 +8,11 @@ struct CodexComputerUseRuntime: Sendable, Equatable {
     let codexHome: String
     let workingDirectory: String
 
+    var appURL: URL {
+        URL(fileURLWithPath: workingDirectory, isDirectory: true)
+            .appendingPathComponent("Codex Computer Use.app", isDirectory: true)
+    }
+
     var isUsable: Bool {
         FileManager.default.isExecutableFile(atPath: executablePath)
     }

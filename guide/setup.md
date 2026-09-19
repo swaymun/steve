@@ -1,37 +1,138 @@
-# Install and set up Steve
+# Set up Steve on a Mac
 
-Steve runs in a signed-in macOS user session. Use an Apple account signed in to Messages on that Mac, and an installed Codex account with access to the selected model. The app must remain running for messages and scheduled tasks to execute.
+The default path is **install and launch → pair iMessage → enable native Computer Use → verify a browser task**. A local agent can perform the installation and open permission settings. You complete login, grant macOS access, and send the pairing code.
+
+Use the tested account arrangement: Messages on Steve's Mac is signed in to a separate account from the person texting Steve. Same-account self-messaging is outside this setup flow; messages marked as sent by the Mac's own account are ignored. Keep the Mac awake and Steve running in its signed-in user session.
 
 ## Install a release
 
-The [v0.1.1 development preview](https://github.com/swaymun/steve/releases/tag/v0.1.1) includes a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Download [`Steve-macOS.zip`](https://github.com/swaymun/steve/releases/download/v0.1.1/Steve-macOS.zip) and [`Steve-macOS.zip.sha256`](https://github.com/swaymun/steve/releases/download/v0.1.1/Steve-macOS.zip.sha256). GitHub's automatic source archives are not the app. Intel builds have not been validated.
+The [v0.1.2 development preview](https://github.com/swaymun/steve/releases/tag/v0.1.2) contains a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Native Computer Use has separate availability and macOS requirements; inspect its installed app and supported Codex setup flow. Intel builds have not been validated.
 
-Download both files from the same release. In the folder containing the downloads, verify the checksum before opening the archive:
+### Discover the right download
+
+Steve is currently distributed as a GitHub prerelease. Use the [published releases list](https://api.github.com/repos/swaymun/steve/releases), including prereleases, rather than `/releases/latest` or `releases/latest/download` (those can return 404 while a preview exists).
+
+An agent should inspect published, non-draft releases in descending version order and choose the newest compatible one. Check the Mac's architecture and macOS version against the release notes, and require both `Steve-macOS.zip` and `Steve-macOS.zip.sha256` in that same release. GitHub's automatic source ZIP/tar archives are not the app. If no compatible app exists, explain the source-build option rather than claiming there is no release.
+
+For this version: [download the app ZIP](https://github.com/swaymun/steve/releases/download/v0.1.2/Steve-macOS.zip) and [its checksum](https://github.com/swaymun/steve/releases/download/v0.1.2/Steve-macOS.zip.sha256). In the download folder:
 
 ```sh
 shasum -a 256 -c Steve-macOS.zip.sha256
-```
-
-The command must report `Steve-macOS.zip: OK`. Extract the ZIP, then verify the app:
-
-```sh
+ditto -x -k Steve-macOS.zip .
 codesign --verify --deep --strict --verbose=2 Steve.app
 spctl --assess --type execute --verbose=2 Steve.app
+xcrun stapler validate Steve.app
 ```
 
-Both commands must succeed. Quit any running Steve, move the new app to `/Applications` or `~/Applications`, and open it. Keep your existing `~/.steve` directory and workspace. Complete the onboarding below; a prebuilt app still needs your account sign-in, pairing, and macOS permission grants. A successful install does not need a retained backup app in Applications.
+Require `Steve-macOS.zip: OK`, a valid signature, and Gatekeeper acceptance as a notarized Developer ID app. The stapler check is useful if Xcode command-line tools are already installed; a release installation does not require installing a Swift toolchain. Inspect the bundle version and identifier (`com.swaymun.steve`). If verification fails, stop and report the actual failure; do not remove quarantine or bypass Gatekeeper.
 
-For agent-assisted onboarding, use the installed executable directly:
+Inspect an existing installation before replacing it. Preserve `~/.steve`, its queued work and schedules, workspace, pairing, and settings. Quit an idle Steve before replacement. Keep a temporary app rollback outside Applications until the updated app is verified, then remove it. Do not keep accumulating backup apps in Applications.
+
+Move Steve.app to `/Applications` or preserve an existing `~/Applications` location, then **launch it before running setup**:
 
 ```sh
-/Applications/Steve.app/Contents/MacOS/Steve setup --non-interactive --json
+steve_app=/Applications/Steve.app
+open "$steve_app"
+steve_cli="$steve_app/Contents/MacOS/Steve"
+"$steve_cli" setup --non-interactive --json
 ```
 
-If you installed into `~/Applications`, use that path instead. Download installation does not add a `steve` command to your shell; commands below use `steve` as shorthand for the installed executable.
+If the app is still starting and the socket is unavailable, check that it launched, then retry once it is running. Do not start a second Messages process. A download does not install a shell wrapper: **`steve` below means this installed executable**, not a command guaranteed to be on PATH.
+
+## CLI onboarding
+
+The CLI talks to a user-owned local socket in the running app. That app owns the macOS permission grants. The CLI does not independently read Messages or copy Codex credentials.
+
+Responses contain `state`, `summary`, `checks`, and optional `values`. States are `ready`, `needs_user_action`, `blocked`, and `failed`; exit codes are 0 for ready, 2 for attention, and 1 for errors. Inspect the JSON even when exit code 2 is returned. `--json` and `--non-interactive` never prompt for terminal input; an explicit permission-opening command still opens macOS Settings.
+
+### 1. Account and access choices
+
+Run setup without options to inspect what is missing. Preserve existing choices. If needed, choose a workspace and access profile in plain language, then apply only those choices:
+
+```sh
+steve setup --workspace "$HOME/SteveWorkspace" --permission workspace-write --json
+```
+
+The profiles are Read Only (`read-only`), Workspace Write (`workspace-write`), and Full Access (`danger-full-access`). Full Access allows routine commands without individual command approval, but does not authorize unrelated purchases, bookings, messages, or account changes. Do not enable it silently. Use the existing browser profile. Select models/effort only from the account's current catalog.
+
+Reuse the existing Codex sign-in. Only if sign-in is missing, run `steve setup --login --non-interactive --json` and let the user finish the official browser flow. Keep returned login URLs private. Login pauses Steve; after authentication, run doctor, then `steve start --json` when ready to resume. Never ask the user to paste ChatGPT tokens or passwords.
+
+### 2. Messages access and pairing
+
+Open Messages on the Mac and confirm its separate receiving account. If Messages access is denied:
+
+```sh
+steve setup --open-permission full-disk-access --json
+```
+
+The helper opens the pane and reveals the installed Steve bundle. The user adds/enables that exact app under Full Disk Access, then relaunches Steve. A grant to Terminal or Codex does not transfer to Steve. A changed signing identity can require the user to remove a stale permission entry and add the current app; do not reset TCC automatically.
+
+Then create a short-lived pairing code:
+
+```sh
+steve setup --pair --non-interactive --json
+```
+
+The user sends the displayed code from their phone in a private iMessage to the returned receiving address. Verify Steve's pairing reply. macOS may ask whether Steve may control Messages; the user allows that prompt. If permission was denied, `steve setup --open-permission messages-automation --json` opens Automation so the user can enable Messages under Steve. That entry may not exist until Steve first requests access during the pairing reply. The helper itself sends no message.
+
+Do not generate a new code if the exact intended conversation is already paired. Do not publish codes or receiving addresses. Group chats and messages sent by the receiving account cannot pair. Fixture tests never send messages; any separate live test requires authorization for its exact destination.
+
+### 3. Native Computer Use
+
+Install and enable the official **native Computer Use** capability through Codex's supported app flow. Follow [Computer Use setup](https://learn.chatgpt.com/docs/computer-use). Do not install a Chrome extension, copy private runtime components, or revive the old browser bridge.
+
+Open its separate permission panes:
+
+```sh
+steve setup --open-permission computer-use-screen-recording --json
+steve setup --open-permission computer-use-accessibility --json
+```
+
+Run one command, finish that grant, then run the next. The helper derives the app's actual display name and path from the discovered installation; it may be displayed as ChatGPT Computer Use. Add that native app, not Steve or the nested command-line helper. Follow any macOS relaunch request. Install Google Chrome if needed for the current browser workflow and use the existing profile.
+
+### 4. Check configuration, then verify a task
+
+```sh
+steve doctor --json
+steve status --json
+```
+
+Resolve required `blocked` or `needs_user_action` checks. Report failures accurately; distinguish a database error from missing permission or account sign-in. After a human handoff, recheck once the user has acted. Do not loop repeatedly on an unchanged missing grant.
+
+`computer_use: ready` means its executable is installed. The separate `computer_use_live: unverified` check has `required: false`: Steve cannot inspect another app's permissions or prove a working browser session. **Repeating doctor will not verify this check.** Likewise, optional Tailscale, video, and phone-control checks do not block ordinary setup. A `ready` CLI result establishes configuration readiness, not end-to-end acceptance.
+
+Have the user text Steve:
+
+> Open example.com and tell me the heading.
+
+Confirm the native Computer Use session opens the page and the reply reports the observed **Example Domain** heading. A plausible reply alone is not proof that the browser was used. Only then call the default onboarding complete. If Computer Use cannot be installed or the live task fails, report the specific remaining step and describe messaging as ready separately.
+
+## Permission helper reference
+
+Available in v0.1.2 and later. Run `setup --open-permission TARGET --json` by itself, without other setup options. Invalid or mixed requests fail before changing settings or opening a pane. Ordinary setup, doctor, and status never open Settings automatically.
+
+| Target | App to grant access to | Purpose |
+| --- | --- | --- |
+| `full-disk-access` | Installed Steve.app | Read the Messages database |
+| `messages-automation` | Steve → Messages | Send the pairing reply and authorized results |
+| `computer-use-screen-recording` | Installed native Computer Use app | View browsers/apps |
+| `computer-use-accessibility` | Installed native Computer Use app | Operate browsers/apps |
+| `steve-screen-recording` | Installed Steve.app, optional | Video evidence and phone control |
+| `steve-accessibility` | Installed Steve.app, optional | Phone-control input |
+
+The response returns `values.permissionTarget`, `appName`, `appPath`, `settingsOpened`, and `nextStep`; a missing app omits the name/path and explains how to install it. `settingsOpened: "true"` means macOS accepted the open request, not that a grant was made or the exact pane was selected. If the pane is wrong or opening fails, follow the returned manual path under System Settings → Privacy & Security. The response remains `needs_user_action` because the user owns the grant. No TCC changes or permission bypasses are performed.
+
+See the [permissions and privacy table](../README.md#permissions-and-privacy). Permissions granted to Computer Use do not apply to Steve's optional features, or vice versa.
+
+## Everyday control
+
+Use normal messages for tasks and “yes”/“no” for a pending decision. Internal approval IDs are available in the CLI for diagnostics, but are not needed in ordinary messages. A status reply describes current work first, with prior failures labeled History. Unconfirmed outcomes need review and are not automatically rerun.
+
+`steve stop` pauses/cancels; `steve start` resumes. In iMessage, say “stop” or “resume.” These do not quit or relaunch the app; use its Quit action to shut down cleanly.
 
 ## Build from source
 
-Inspect the checkout before executing it. Install Apple's command-line tools/Xcode if the Swift toolchain is missing. Follow the [official Codex installation instructions](https://developers.openai.com/codex/cli/) and [Computer Use setup](https://learn.chatgpt.com/docs/computer-use). Computer Use must be installed and enabled through the supported app flow; executable discovery alone does not establish permission or session readiness.
+Use source builds only when needed. Inspect the checkout and follow contributor instructions. Install Apple's command-line tools/Xcode if the Swift toolchain is missing; follow the [official Codex installation instructions](https://developers.openai.com/codex/cli/).
 
 ```sh
 swift test --package-path native
@@ -40,39 +141,7 @@ open "$HOME/Applications/Steve.app"
 "$HOME/Applications/Steve.app/Contents/MacOS/Steve" setup --non-interactive --json
 ```
 
-The installer defaults to `~/Applications/Steve.app` and keeps `~/.steve` and your workspace. During replacement it holds the previous app as a rollback, verifies the installed signature and CLI entry point, then removes that temporary app backup after success. A failed verification restores the previous app and retains the failed bundle for inspection. The installer does not install dependencies or select an Apple signing account automatically. Source builds use ad hoc signing unless you explicitly pass `--signing-identity`. A changed signing identity may require macOS permissions again. Use a notarized release only when one is actually published and verified.
-
-If Steve is already running, quit it before replacement, or explicitly use `--replace-running`. An optional wrapper is installed only when `--bin-dir` is supplied. Add that directory to your own shell PATH if desired; otherwise use the executable's full path.
-
-## CLI onboarding
-
-The CLI talks to a user-owned local socket in the running app. It does not start a second Messages watcher, read the Messages database, or copy authentication files. JSON output has a `state`, `summary`, `checks`, and optional `values`. States are `ready`, `needs_user_action`, `blocked`, and `failed`; exit codes are 0 for ready, 2 for attention, and 1 for errors. Optional checks carry `required: false`.
-
-```sh
-steve setup --workspace "$HOME/SteveWorkspace" --permission workspace-write --json
-steve setup --login --non-interactive --json
-steve setup --pair --non-interactive --json
-steve doctor --json
-steve status --json
-steve stop --json
-steve start --json
-```
-
-Without flags in an interactive terminal, setup asks for a workspace and permission choice. Pressing Return preserves the existing choice. `--non-interactive` and `--json` never prompt for terminal input. Setup applies only explicit choices; later sign-in or pairing failure can follow an already-saved configuration change, which is reported in `values.applied`. After a timeout, check status before retrying a mutation.
-
-Choose `read-only`, `workspace-write`, or `danger-full-access` deliberately. Full Access runs commands without command approvals and grants routine app/site access for the active task. It does not complete account reconnection, accept unknown forms, or authorize unrelated purchases, bookings, messages, or account changes. Other profiles retain their approval behavior. A filesystem sandbox does not by itself constrain every external application. Model and reasoning effort choices must match the account's current catalog.
-
-When Steve needs a decision, reply “yes” or “no.” It presents one ordinary approval at a time and binds the reply to the prompt already delivered in the paired conversation. Internal approval IDs remain available to the local CLI for diagnostics; they are not required in normal messages.
-
-`setup --login` returns an official browser authentication URL. The human completes that flow. Sign-in pauses Steve. Run doctor afterward to refresh account state, then start to resume after authentication finishes. Grant Steve Full Disk Access in System Settings, then relaunch it. Messages Automation permission is established by an explicitly authorized first reply. Grant the separate Computer Use app its requested Screen Recording and Accessibility permissions. These system prompts cannot be silently approved by onboarding.
-
-See the [permissions table](../README.md#permissions-and-privacy) for each grant and its purpose. Phone control needs Steve's own Screen Recording and Accessibility permissions; a grant to Computer Use does not transfer to Steve. Video evidence needs Steve's Screen Recording permission, but basic iMessage replies do not.
-
-`setup --pair` returns a short-lived code and the receiving address. Send that code in a private iMessage to the displayed Mac account. Do not publish the output or paste passwords, one-time authentication codes, cookies, or payment details into the conversation. Pairing codes authorize one exact conversation and sender.
-
-An iMessage status reply describes current work first. Past failures appear separately under History and remain saved; they are not queued for retry. Unconfirmed outcomes still need review and are never automatically rerun.
-
-`steve stop` pauses/cancels the operator; `steve start` resumes it. In iMessage, say “stop” or “resume.” These commands do not quit or relaunch the menu-bar app. Use the app's Quit action to shut down cleanly.
+The installer preserves data and workspace, defaults to `~/Applications/Steve.app`, and removes the temporary app rollback after its signature/CLI checks succeed. Failed verification restores the previous app. Source builds are ad hoc signed unless an existing identity is explicitly selected with `--signing-identity`; changing identity can require fresh macOS grants. Source installation does not imply live acceptance. Quit Steve before replacement or pass `--replace-running`. The optional shell wrapper is installed only with `--bin-dir`.
 
 ## Optional Tailscale setup
 

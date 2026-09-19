@@ -1,41 +1,59 @@
 # Steve
 
-Steve connects one private iMessage conversation to a persistent operator on your Mac. A small native menu-bar app owns Messages, the workspace boundary, and a relay/worker pair running through the installed Codex App Server. Authentication stays with Codex; Steve does not store ChatGPT tokens or require an OpenAI API key.
+**Text a Codex agent through iMessage.**
 
-<img src="guide/images/messages-reminder.jpg" alt="A real Messages conversation: asking Steve to remind you to stretch in two hours, receiving a confirmation with EDT, and cancelling the reminder." width="704">
+Steve runs on your Mac, uses your existing Codex login and browser session, and sends results back to your phone. Ask it to research, work in apps, manage reminders, or record what it did.
 
-An actual conversation with Steve running on another Mac. The reminder was cancelled after the screenshot demo; no scheduled reminder remains from it.
+<img src="guide/images/messages-reminder.png" alt="A real Messages exchange: asking Steve to remind you to stretch, receiving a confirmation in EDT, then cancelling the reminder." width="800">
 
-**Development preview.** Paired iMessage delivery, preferences, reminders, browser research, bounded email reads, and native video delivery have been exercised on a Mac. Calendar coverage is partial, and complete phone login and video playback on an iPhone still need acceptance testing. See the [practical benchmark report](guide/practical-benchmark-20260919.md) for results and limitations. Steve is MIT licensed.
+A real reminder conversation, captured at native resolution. The reminder was cancelled after the demo.
 
-## Install
+## What you can ask Steve
 
-Use a Mac running macOS 14 or later, signed in to Messages, with Codex installed and signed in. The Mac must stay awake and Steve must remain running to perform tasks. Basic messaging needs no iPhone extension or companion app.
+> Research the best monitor arm under $100.
+>
+> Remind me tomorrow at 9 AM to call the dentist.
+>
+> Check my email for the reservation confirmation.
+>
+> Record a short video showing me what you changed.
 
-[Download Steve v0.1.1 for Apple silicon](https://github.com/swaymun/steve/releases/download/v0.1.1/Steve-macOS.zip) · [SHA-256 checksum](https://github.com/swaymun/steve/releases/download/v0.1.1/Steve-macOS.zip.sha256) · [Release notes](https://github.com/swaymun/steve/releases/tag/v0.1.1)
+Email needs a connected account; video needs Steve's Screen Recording permission.
 
-The prebuilt development preview is signed with Developer ID and notarized by Apple. Verify the download using [the setup guide](guide/setup.md#install-a-release), then move `Steve.app` to Applications. No source build is needed. This archive is for Apple silicon (arm64); Intel users can try [building from source](guide/setup.md#build-from-source), but Intel builds have not been validated.
+```text
+iPhone → iMessage → Steve on your Mac → Codex → apps and websites
+       ← results, files, and recordings ←
+```
 
-Open Steve, finish Codex sign-in and macOS permissions, choose a workspace and access profile, then pair your private iMessage conversation with the displayed code. Add Steve as a contact on your phone and ask for a task in normal language.
+**Development preview:** iMessage tasks, browser research, reminders, email reads, and video delivery have been exercised on a Mac. Phone login, iPhone video playback, and calendar support have [remaining acceptance gaps](guide/practical-benchmark-20260919.md). MIT licensed.
 
-## Set it up with your agent
+## Install with an agent
 
-Give a local coding agent this repository and the following request:
+Give a local Codex agent [this repository](https://github.com/swaymun/steve) and say:
 
-> Help me install Steve from this repository. Read AGENTS.md and guide/setup.md first. Inspect my existing installation and dependencies and preserve my settings and data. Prefer the latest compatible signed, notarized release and verify its checksum and signature; if none exists, explain the source-build option. Run the installed app's setup --non-interactive --json command. Explain each needs_user_action step and help me finish account login, macOS permissions, and exact iMessage pairing. Use my existing browser profile. Ask for any missing access choice rather than enabling full computer access automatically. Do not copy credentials into chat or send a live test until I authorize the destination.
+> Set up Steve on this Mac. Follow AGENTS.md and guide/setup.md, use the newest compatible signed release including previews, and guide me through permissions, iMessage pairing, and native Computer Use.
 
-The agent needs local tools on the Mac that will run Steve. A web chat without local access cannot install a Mac app. Follow [the setup guide](guide/setup.md) for manual installation and machine-readable commands.
+The agent can install and launch Steve, inspect setup, open the right macOS permission pane, and show the app you need to add. **You grant permissions, finish sign-in, and send the pairing code.** It then helps set up native Computer Use using your existing browser profile. No Chrome extension or iPhone extension is needed.
 
-## How it works
+The setup sequence is:
 
-- The persistent relay interprets requests and formats verified results; a persistent worker performs the task. Context can be reused, compacted, or deliberately reset.
-- The installed Computer Use plugin operates visible Chrome using the existing profile. Install the plugin through its supported ChatGPT/Codex flow; it is not redistributed in this repository.
-- Incoming messages and outgoing parts are persisted. Restart recovery preserves queued requests. Ambiguous executions or sends are recorded for review rather than automatically replayed.
-- Explicitly saved preferences survive restart and can be listed or forgotten. Reminders and scheduled tasks use durable records and explicit timezones; uncertain outcomes block automatic repetition.
-- One exact private conversation is paired with a short-lived code. Other chats, group conversations, and mismatched senders cannot operate Steve.
-- Say what you want in normal language, such as “Remind me in two hours to stretch” or “Find me a good cable organizer under $25.” Steve handles tools, context, and verification; remaining decisions use “yes” or “no.” `/stop` is the emergency pause command. Say “resume” to continue accepting work or “status” to inspect the current state. A stopped task with uncertain side effects is not automatically rerun.
+1. Install and launch Steve.
+2. Run `setup --non-interactive --json` and resolve the reported human steps.
+3. Pair iMessage, then install/enable native Computer Use and its permissions.
+4. Run `doctor --json` and `status --json`.
+5. Text Steve: **“Open example.com and tell me the heading.”** Verify the browser result before calling setup complete.
 
-Steve uses read-only access to the local Messages database and public AppleScript sending. It does not require private Messages frameworks or SIP changes. Optional phone control uses Safari to show the Mac's current browser session; it requires Tailscale on both devices, connected to the same private network. A URL alone does not make that page public. See [phone setup](guide/setup.md#optional-tailscale-setup).
+The commands use the running app's local CLI. A web chat without local Mac tools cannot perform the installation. See the [ordered setup guide](guide/setup.md#cli-onboarding) for exact commands and how to interpret readiness.
+
+## Install manually
+
+[Download v0.1.2 for Apple silicon](https://github.com/swaymun/steve/releases/download/v0.1.2/Steve-macOS.zip) · [SHA-256 checksum](https://github.com/swaymun/steve/releases/download/v0.1.2/Steve-macOS.zip.sha256) · [Release notes](https://github.com/swaymun/steve/releases/tag/v0.1.2)
+
+Use macOS 14 or later with Codex installed and signed in. The prebuilt app is Developer ID signed and notarized by Apple; no source build is needed. Native Computer Use has its own availability and macOS requirements. The Mac must remain awake, signed in, and running Steve.
+
+**Messages accounts:** the tested setup uses a separate Messages account on Steve's Mac from the person texting it. Same-account self-messaging is not supported by this onboarding flow: Steve ignores messages marked as sent by its own account.
+
+[Verify the download, move Steve.app into Applications, and launch it](guide/setup.md#install-a-release). Then follow the same pairing and Computer Use sequence above. These downloads are currently **GitHub prereleases**; agents must include prereleases when discovering builds. Intel users can [build from source](guide/setup.md#build-from-source), but Intel builds have not been validated.
 
 ## Permissions and privacy
 
@@ -54,6 +72,17 @@ macOS asks you to grant these permissions yourself. Steve's access profile and t
 Choose Read Only, Workspace Write, or Full Access deliberately. Full Access allows commands without individual command approval and is powerful; it does not itself grant permission for unrelated purchases, bookings, or messages. The default browser session can already be signed in to your accounts, so choose a profile you are comfortable using for tasks.
 
 Messages content and relevant task context are sent to Codex to process requests. Steve stores pairing, queues, settings, and thread IDs locally in `~/.steve`; Codex maintains its own conversations. Phone-control images and typed input stay out of Steve's model conversation and recordings. The shared display can include other visible apps, so close private windows before taking control. Native video defaults to one selected window; optional system audio requires an explicit request, and microphone recording is not supported. Never paste passwords, one-time login codes, or payment details into iMessage.
+
+
+## How Steve works
+
+Steve is a native SwiftUI menu-bar app. A persistent relay interprets messages and formats verified results; a persistent worker performs tasks through the installed Codex App Server. Context can be reused or compacted. Codex owns authentication; Steve stores no ChatGPT tokens and needs no OpenAI API key.
+
+Native Computer Use operates the visible browser and apps. Steve reads the local Messages database and sends replies through public AppleScript. Queues, saved preferences, reminders, and task state persist across restarts. Ambiguous executions or sends need review and are never automatically replayed.
+
+One exact private conversation is paired with a short-lived code. Other chats, groups, and mismatched senders cannot operate Steve. Use ordinary language for tasks. Say **status** to inspect work, **/stop** to pause, or **resume** to accept work again. Old failures are labeled separately as History.
+
+Optional [phone control](guide/setup.md#phone-control-in-safari) shows the Mac's current browser session in Safari through private Tailscale Serve. Tailscale is required on both devices for this feature; basic messaging and Computer Use do not need it.
 
 ## Development
 

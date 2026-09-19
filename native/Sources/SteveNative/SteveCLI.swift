@@ -13,11 +13,17 @@ enum SteveCLI {
       steve video cancel [--json]
       setup [--workspace /absolute/path] [--permission PROFILE]
             [--model ID] [--effort EFFORT] [--service-tier standard|fast] [--login] [--pair] [--tailscale-connect] [--phone-access]
+      setup --open-permission TARGET [--json] [--non-interactive]
+        TARGET: full-disk-access, messages-automation,
+                computer-use-screen-recording, computer-use-accessibility,
+                steve-screen-recording, steve-accessibility
 
     Open Steve.app first. Commands use the running app's permissions and session.
     setup applies only explicit choices. --login returns the official sign-in URL;
     --pair returns a one-time code to send in Messages. Neither bypasses human login
     or macOS permission prompts. --non-interactive never waits for terminal input.
+    --open-permission opens Settings for a human grant; use it separately from
+    other setup options. Ordinary setup and doctor do not open Settings.
     start resumes the operator; stop pauses and cancels it. It does not quit the app.
     JSON states: ready, needs_user_action, blocked, failed. Exit: 0 ready, 2 attention,
     1 error. Do not share setup output containing a live pairing code.
@@ -72,9 +78,20 @@ enum SteveCLI {
                 guard command == "setup", index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else { throw RPCError(message: "\(arg) requires a value on setup.") }
                 index += 1
                 request.options[String(arg.dropFirst(2))] = arguments[index]
+            case "--open-permission":
+                guard command == "setup", index + 1 < arguments.count,
+                      StevePermissionTarget(rawValue: arguments[index + 1]) != nil,
+                      request.options["open-permission"] == nil else {
+                    throw RPCError(message: "Choose one supported --open-permission target from steve --help.")
+                }
+                index += 1
+                request.options["open-permission"] = arguments[index]
             default: throw RPCError(message: "Unknown option: \(arg)")
             }
             index += 1
+        }
+        guard request.options["open-permission"] == nil || request.options.count == 1 else {
+            throw RPCError(message: "Use --open-permission separately from other setup options; no changes were applied.")
         }
         return (request, json, interactive)
     }

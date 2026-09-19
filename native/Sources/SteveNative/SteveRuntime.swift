@@ -1172,7 +1172,8 @@ actor SteveRuntime {
         let uncertain = (try? await store.uncertainWorkCount()) ?? 0
         let connected = account?.account != nil
         let detail = lastError ?? messagesError ?? (uncertain > 0 ? "Some work has an uncertain outcome and was not retried." : nil) ?? (connected ? "" : "Sign in to Codex to continue.")
-        let dependency = Dependency(name: "codex", available: account != nil || lastError == nil, detail: detail)
+        let dependency = Dependency(name: "codex", available: account != nil || lastError == nil,
+                                    detail: lastError ?? (connected ? "" : "Sign in to Codex to continue."))
         let trusted = try? await store.trustedConversation()
         let pairing = try? await store.pairingChallenge()
         return Snapshot(

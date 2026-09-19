@@ -3,6 +3,32 @@ import SQLite
 @testable import SteveNative
 
 final class SteveControlTests: XCTestCase {
+    func testPermissionHandoffRunsOnlyExplicitlyAndRejectsChangesBeforeOpening() async throws {
+        let (root, store, runtime, _) = try await settingsRuntime()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let before = try await store.getSettings()
+        let response = await SteveControl.handle(.init(command: "setup", options: ["open-permission": "full-disk-access"]), runtime: runtime) { target in
+            XCTAssertEqual(target, .fullDiskAccess)
+            return SteveControlResponse(state: "needs_user_action", summary: "fixture permission handoff", values: ["settingsOpened": "true"])
+        }
+        XCTAssertEqual(response.summary, "fixture permission handoff")
+        for options in [["open-permission": "unknown", "workspace": "/tmp/should-not-be-created"],
+                        ["open-permission": "full-disk-access", "permission": "danger-full-access"]] {
+            let rejected = await SteveControl.handle(.init(command: "setup", options: options), runtime: runtime) { _ in
+                XCTFail("Opened Settings for an invalid or mixed request")
+                return SteveControlResponse(state: "ready", summary: "unexpected")
+            }
+            XCTAssertEqual(rejected.state, "failed")
+        }
+        _ = await SteveControl.handle(.init(command: "status"), runtime: runtime) { _ in
+            XCTFail("Ordinary status opened Settings")
+            return SteveControlResponse(state: "ready", summary: "unexpected")
+        }
+        let after = try await store.getSettings()
+        XCTAssertEqual(after?.workspaceRoot, before?.workspaceRoot)
+        XCTAssertEqual(after?.permissionProfile, before?.permissionProfile)
+    }
+
     private func settingsRuntime() async throws -> (URL, SteveStore, SteveRuntime, Connection) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

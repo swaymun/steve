@@ -25,7 +25,8 @@ struct SteveControlResponse: Codable, Sendable {
 /// Local CLI requests execute inside the user-session app, which owns TCC
 /// permissions and the single gateway. The CLI never opens the Messages DB.
 enum SteveControl {
-    static func handle(_ request: SteveControlRequest, runtime: SteveRuntime) async -> SteveControlResponse {
+    static func handle(_ request: SteveControlRequest, runtime: SteveRuntime,
+                       openPermission: @MainActor (StevePermissionTarget) -> SteveControlResponse = { StevePermissionSettings.open($0) }) async -> SteveControlResponse {
         var applied: [String] = []
         do {
             var values: [String: String] = [:]
@@ -49,9 +50,15 @@ enum SteveControl {
             case "start": try await runtime.setPaused(false)
             case "stop": try await runtime.setPaused(true)
             case "setup":
-                let allowed: Set<String> = ["workspace", "permission", "model", "effort", "service-tier", "login", "pair", "tailscale-connect", "phone-access"]
+                let allowed: Set<String> = ["workspace", "permission", "model", "effort", "service-tier", "login", "pair", "tailscale-connect", "phone-access", "open-permission"]
                 guard Set(request.options.keys).isSubset(of: allowed) else {
                     throw RPCError(message: "Unknown setup option; no changes were applied.")
+                }
+                if let name = request.options["open-permission"] {
+                    guard let target = StevePermissionTarget(rawValue: name), request.options.count == 1 else {
+                        throw RPCError(message: "Use one supported --open-permission target separately from other setup options; no changes were applied.")
+                    }
+                    return await openPermission(target)
                 }
                 // Validate configuration choices before applying them. Account
                 // sign-in and pairing are resumable steps, not one transaction.
@@ -98,32 +105,64 @@ enum SteveControl {
                 SteveSetupCheck(name: "phone", state: snapshot.trustedConversation == nil ? "needs_user_action" : "ready", detail: snapshot.trustedConversation == nil ? "Run setup --pair and send the displayed code from the phone." : "An exact private Messages conversation is paired."),
                 SteveSetupCheck(name: "operator", state: snapshot.paused ? "blocked" : "ready", detail: snapshot.paused ? "Paused. Run start to resume." : "Enabled.")
             ]
-            for dependency in snapshot.dependencies {
+            let diagnostics = request.command == "doctor" || request.command == "setup"
+            for dependency in snapshot.dependencies where !diagnostics || dependency.name != "messages" {
                 checks.append(SteveSetupCheck(name: dependency.name, state: dependency.available ? "ready" : "blocked", detail: dependency.detail))
             }
-            if snapshot.status.state != "Ready", !snapshot.paused {
+            if snapshot.status.state != "Ready", !snapshot.paused,
+               !checks.contains(where: { $0.detail == snapshot.status.detail }),
+               !(diagnostics && snapshot.dependencies.contains(where: { $0.name == "messages" && $0.detail == snapshot.status.detail })) {
                 checks.append(SteveSetupCheck(name: "runtime", state: "needs_user_action", detail: snapshot.status.detail))
             }
-            if request.command == "doctor" || request.command == "setup" {
+            if diagnostics {
                 let network = await TailscaleSetup.check(connect: request.options["tailscale-connect"] == "true")
                 checks.append(network.0)
                 values["tailscaleAuthURL"] = network.1
-                checks.append(SteveSetupCheck(name: "computer_use", state: CodexComputerUseRuntime.discover() == nil ? "needs_user_action" : "unverified", detail: "Install and enable the official Computer Use plugin in ChatGPT/Codex. Executable discovery alone does not verify its permissions or a live session."))
+                checks.append(contentsOf: computerUseChecks(installed: CodexComputerUseRuntime.discover() != nil))
                 let chrome = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") != nil
                 checks.append(SteveSetupCheck(name: "chrome", state: chrome ? "ready" : "needs_user_action", detail: chrome ? "Google Chrome installed; its existing profile is used." : "Install Google Chrome for browser tasks."))
-                checks.append(SteveSetupCheck(name: "steve_screen_recording", state: CGPreflightScreenCaptureAccess() ? "ready" : "needs_user_action", detail: "Steve's own Screen Recording grant is needed for phone takeover. This does not check the separate Computer Use plugin's grant.", required: false))
-                checks.append(SteveSetupCheck(name: "steve_accessibility", state: AXIsProcessTrusted() ? "ready" : "needs_user_action", detail: "Steve's own Accessibility grant is needed for phone input. This does not check the separate Computer Use plugin's grant.", required: false))
-                do {
-                    let accounts = try await runtime.messages.discoverAccounts()
-                    checks.append(SteveSetupCheck(name: "messages", state: accounts.isEmpty ? "needs_user_action" : "ready", detail: accounts.isEmpty ? "Sign in to Messages on this Mac." : "Messages database is readable and a local account was discovered. Sending Automation permission is verified by an authorized live reply."))
-                } catch {
-                    checks.append(SteveSetupCheck(name: "messages", state: "needs_user_action", detail: "Enable Steve under Full Disk Access and relaunch it; then sign in to Messages."))
-                }
+                checks.append(SteveSetupCheck(name: "steve_screen_recording", state: CGPreflightScreenCaptureAccess() ? "ready" : "needs_user_action", detail: "Steve's own Screen Recording grant is optional for video evidence and phone takeover. This does not check Computer Use's separate grant. Open with setup --open-permission steve-screen-recording.", required: false))
+                checks.append(SteveSetupCheck(name: "steve_accessibility", state: AXIsProcessTrusted() ? "ready" : "needs_user_action", detail: "Steve's own Accessibility grant is optional for phone input. This does not check the native Computer Use app's grant. Open with setup --open-permission steve-accessibility.", required: false))
+                let accounts: Result<[MessagesAccount], Error>
+                do { accounts = .success(try await runtime.messages.discoverAccounts()) }
+                catch { accounts = .failure(error) }
+                checks.append(messagesCheck(accounts: accounts, watcher: snapshot.dependencies.first { $0.name == "messages" }))
             }
-            let state = checks.contains(where: { $0.required && $0.state == "blocked" }) ? "blocked" : checks.contains(where: { $0.required && $0.state != "ready" }) ? "needs_user_action" : "ready"
+            let state = readiness(checks)
             return SteveControlResponse(state: state, summary: snapshot.status.detail.isEmpty ? (snapshot.paused ? "Steve is paused." : "Steve is running.") : snapshot.status.detail, checks: checks, values: values)
         } catch {
             return SteveControlResponse(state: "failed", summary: error.localizedDescription, values: applied.isEmpty ? [:] : ["applied": applied.joined(separator: ","), "nextStep": "These settings were saved before the later step failed. Run status and resume the remaining setup step."])
+        }
+    }
+
+    static func readiness(_ checks: [SteveSetupCheck]) -> String {
+        checks.contains(where: { $0.required && $0.state == "blocked" }) ? "blocked" :
+            checks.contains(where: { $0.required && $0.state != "ready" }) ? "needs_user_action" : "ready"
+    }
+
+    static func computerUseChecks(installed: Bool) -> [SteveSetupCheck] {
+        [SteveSetupCheck(name: "computer_use", state: installed ? "ready" : "needs_user_action",
+                         detail: installed ? "Native Computer Use is installed. Its permissions and live session are checked separately."
+                            : "Install and enable native Computer Use through Codex. No Chrome extension is needed."),
+         SteveSetupCheck(name: "computer_use_live", state: "unverified",
+                         detail: "Steve cannot inspect another app's permissions. After pairing, enable Computer Use's Screen Recording and Accessibility, then ask Steve: Open example.com and tell me the heading. Verify the actual browser result; repeating doctor will not verify this check.", required: false)]
+    }
+
+    static func messagesCheck(accounts: Result<[MessagesAccount], Error>, watcher: Dependency?) -> SteveSetupCheck {
+        switch accounts {
+        case .success(let accounts):
+            if accounts.isEmpty {
+                return SteveSetupCheck(name: "messages", state: "needs_user_action", detail: "Open Messages and sign in on Steve's Mac using the separate Messages account described in guide/setup.md.")
+            }
+            if let watcher, !watcher.available {
+                return SteveSetupCheck(name: "messages", state: "blocked", detail: "The Messages database is readable, but its watcher is unavailable: \(watcher.detail) Relaunch Steve, then run doctor again.")
+            }
+            return SteveSetupCheck(name: "messages", state: "ready", detail: "Messages database is readable and a local account was discovered. Confirm the receiving account in Messages. Sending Automation permission is verified by your pairing reply or another authorized live reply.")
+        case .failure(let error):
+            if case MessagesService.ServiceError.permission = error {
+                return SteveSetupCheck(name: "messages", state: "needs_user_action", detail: "Run setup --open-permission full-disk-access, enable Steve, then relaunch it and run doctor again.")
+            }
+            return SteveSetupCheck(name: "messages", state: "blocked", detail: "Messages database could not be read: \(error.localizedDescription) Open Messages and check its account, then run doctor again. If macOS denied access, use setup --open-permission full-disk-access.")
         }
     }
 }
