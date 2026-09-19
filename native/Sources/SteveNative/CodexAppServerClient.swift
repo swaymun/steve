@@ -1383,6 +1383,7 @@ actor CodexAppServerClient {
               actual == requested.resolvedValue || actual == requested.wireValue else {
             throw RPCError(message: "Codex did not confirm the requested service tier; the task was not started.")
         }
+        SteveLog.write("Codex service tier confirmed requested=\(requested.rawValue) resolved=\(actual)")
     }
 
     private func permissionContext(_ profile: String) throws -> (String, String) {
