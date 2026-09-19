@@ -17,21 +17,19 @@ final class NativePhoneDesktopControl: NSObject, PhoneDesktopControl {
     private var capturedBounds: CGRect?
     private var indicator: NSPanel?
     private var observers: [NSObjectProtocol] = []
-    private var sessionUnavailable = false
+    private var sessionState = CaptureSessionState()
 
     override init() {
         super.init()
-        for name in [NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.screensDidSleepNotification] {
+        for name in CaptureSessionState.notifications {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.sessionUnavailable = true
-                    self?.onStopRequested?()
+                    guard let self else { return }
+                    self.sessionState.receive(name)
+                    if !self.sessionState.isAvailable { self.onStopRequested?() }
                 }
             })
         }
-        observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.sessionUnavailable = false }
-        })
     }
 
     func missingPermissions() async -> [String] {
@@ -139,7 +137,7 @@ final class NativePhoneDesktopControl: NSObject, PhoneDesktopControl {
     private func requireUserSession() throws {
         let session = CGSessionCopyCurrentDictionary() as? [String: Any]
         let protectedApps: Set<String> = ["com.apple.loginwindow", "com.apple.SecurityAgent", "com.apple.authorizationhost", "com.apple.systempreferences"]
-        guard accessStillAllowed(), !sessionUnavailable,
+        guard accessStillAllowed(), sessionState.isAvailable,
               session?[kCGSessionOnConsoleKey as String] as? Bool == true,
               session?[kCGSessionLoginDoneKey as String] as? Bool == true,
               !protectedApps.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "") else {

@@ -36,23 +36,21 @@ final class NativeTaskVideoRecorder: NSObject, TaskVideoRecording {
     private var watchdog: Task<Void, Never>?
     private var badge: NSStatusItem?
     private var observers: [NSObjectProtocol] = []
-    private var sessionUnavailable = false
+    private var sessionState = CaptureSessionState()
 
     override init() {
         super.init()
-        for name in [NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.screensDidSleepNotification] {
+        for name in CaptureSessionState.notifications {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.sessionUnavailable = true
-                    self?.active?.sink.invalidate()
-                    self?.active?.writer.cancel(.privacy)
-                    Task { await self?.cancel() }
+                    guard let self else { return }
+                    self.sessionState.receive(name)
+                    if !self.sessionState.isAvailable {
+                        self.active?.sink.invalidate()
+                        self.active?.writer.cancel(.privacy)
+                        Task { await self.cancel() }
+                    }
                 }
-            })
-        }
-        for name in [NSWorkspace.sessionDidBecomeActiveNotification, NSWorkspace.screensDidWakeNotification] {
-            observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.sessionUnavailable = false }
             })
         }
     }
@@ -228,7 +226,7 @@ final class NativeTaskVideoRecorder: NSObject, TaskVideoRecording {
     private func sessionIsUsable() -> Bool {
         let session = CGSessionCopyCurrentDictionary() as? [String: Any]
         let protected: Set<String> = ["com.apple.loginwindow", "com.apple.SecurityAgent", "com.apple.authorizationhost", "com.apple.systempreferences"]
-        return !sessionUnavailable && session?[kCGSessionOnConsoleKey as String] as? Bool == true && session?[kCGSessionLoginDoneKey as String] as? Bool == true && !protected.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "")
+        return sessionState.isAvailable && session?[kCGSessionOnConsoleKey as String] as? Bool == true && session?[kCGSessionLoginDoneKey as String] as? Bool == true && !protected.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "")
     }
 
     static func makeDirectory(workspace: URL, id: UUID) throws -> URL {

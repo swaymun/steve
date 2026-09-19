@@ -1,4 +1,25 @@
-import Foundation
+import AppKit
+
+/// Session switching and display sleep are independent. Waking a display must
+/// not clear a still-inactive user session, and activation must not clear sleep.
+struct CaptureSessionState {
+    static let notifications = [NSWorkspace.sessionDidResignActiveNotification,
+        NSWorkspace.sessionDidBecomeActiveNotification,
+        NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification]
+    private var active = true
+    private var awake = true
+    var isAvailable: Bool { active && awake }
+
+    mutating func receive(_ name: Notification.Name) {
+        switch name {
+        case NSWorkspace.sessionDidResignActiveNotification: active = false
+        case NSWorkspace.sessionDidBecomeActiveNotification: active = true
+        case NSWorkspace.screensDidSleepNotification: awake = false
+        case NSWorkspace.screensDidWakeNotification: awake = true
+        default: break
+        }
+    }
+}
 
 /// Synchronous gate for native capture/input callbacks. Gateway invalidation
 /// closes it before any suspension point, including pause, revoke, and takeover.

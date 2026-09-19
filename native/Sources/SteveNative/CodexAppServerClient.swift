@@ -1090,12 +1090,14 @@ final class CodexRPCConnection: @unchecked Sendable {
 
 actor CodexAppServerClient {
     private static let autoCompactionTokenLimit = 100_000
-    private let connection = CodexRPCConnection()
+    private let connection: CodexRPCConnection
     private var initialized = false
     private var initializationTask: Task<Void, Error>?
     private var lifecycle = UUID()
     private var requestInFlight = false
     private var requestWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(connection: CodexRPCConnection = CodexRPCConnection()) { self.connection = connection }
 
     func stop() {
         lifecycle = UUID()

@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import XCTest
@@ -23,6 +24,31 @@ private final class CaptureFakeRecorder: TaskVideoRecording {
 }
 
 final class CaptureBoundaryTests: XCTestCase {
+    func testDisplayWakeRestoresAvailabilityWithoutClearingInactiveSession() {
+        var state = CaptureSessionState()
+        XCTAssertTrue(state.isAvailable)
+        state.receive(NSWorkspace.screensDidSleepNotification)
+        XCTAssertFalse(state.isAvailable)
+        state.receive(NSWorkspace.screensDidWakeNotification)
+        XCTAssertTrue(state.isAvailable)
+        state.receive(NSWorkspace.sessionDidResignActiveNotification)
+        state.receive(NSWorkspace.screensDidSleepNotification)
+        state.receive(NSWorkspace.screensDidWakeNotification)
+        XCTAssertFalse(state.isAvailable, "A waking screen does not activate a signed-out user session")
+        state.receive(NSWorkspace.sessionDidBecomeActiveNotification)
+        XCTAssertTrue(state.isAvailable)
+    }
+
+    func testSessionActivationDoesNotClearDisplaySleep() {
+        var state = CaptureSessionState()
+        state.receive(NSWorkspace.screensDidSleepNotification)
+        state.receive(NSWorkspace.sessionDidResignActiveNotification)
+        state.receive(NSWorkspace.sessionDidBecomeActiveNotification)
+        XCTAssertFalse(state.isAvailable)
+        state.receive(NSWorkspace.screensDidWakeNotification)
+        XCTAssertTrue(state.isAvailable)
+    }
+
     func testWindowTargetRequiresExactScopeAndRejectsWideningOrAudio() throws {
         XCTAssertEqual(try TaskVideoTarget.parse(["window": "42", "app": "com.apple.TextEdit"]), .window(42, app: "com.apple.TextEdit"))
         XCTAssertEqual(try TaskVideoTarget.parse(["display": "1", "audio": "true"]), .display(1))

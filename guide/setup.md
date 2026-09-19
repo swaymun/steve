@@ -2,7 +2,35 @@
 
 Steve runs in a signed-in macOS user session. Use an Apple account signed in to Messages on that Mac, and an installed Codex account with access to the selected model. The app must remain running for messages and scheduled tasks to execute.
 
-## Build and install
+## Install a release
+
+The first prebuilt release is awaiting signing and notarization. Check [GitHub Releases](https://github.com/swaymun/steve/releases) for a published `Steve-macOS.zip` and `Steve-macOS.zip.sha256`; GitHub's automatic source archives are not the app. Do not assume a release exists just because this guide describes installation. Match the architecture in the release notes to your Mac.
+
+Once the app archive is available, download both files from the same release. In the folder containing the downloads, verify the checksum before opening the archive:
+
+```sh
+shasum -a 256 Steve-macOS.zip
+cat Steve-macOS.zip.sha256
+```
+
+The 64-character hashes must match. Extract the ZIP, then verify the app:
+
+```sh
+codesign --verify --deep --strict --verbose=2 Steve.app
+spctl --assess --type execute --verbose=2 Steve.app
+```
+
+Both commands must succeed. Quit any running Steve, move the new app to `/Applications` or `~/Applications`, and open it. Keep your existing `~/.steve` directory and workspace. Complete the onboarding below; a prebuilt app still needs your account sign-in, pairing, and macOS permission grants. A successful install does not need a retained backup app in Applications.
+
+For agent-assisted onboarding, use the installed executable directly:
+
+```sh
+/Applications/Steve.app/Contents/MacOS/Steve setup --non-interactive --json
+```
+
+If you installed into `~/Applications`, use that path instead. Download installation does not add a `steve` command to your shell; commands below use `steve` as shorthand for the installed executable.
+
+## Build from source
 
 Inspect the checkout before executing it. Install Apple's command-line tools/Xcode if the Swift toolchain is missing. Follow the [official Codex installation instructions](https://developers.openai.com/codex/cli/) and [Computer Use setup](https://learn.chatgpt.com/docs/computer-use). Computer Use must be installed and enabled through the supported app flow; executable discovery alone does not establish permission or session readiness.
 
@@ -39,6 +67,8 @@ When Steve needs a decision, reply “yes” or “no.” It presents one ordina
 
 `setup --login` returns an official browser authentication URL. The human completes that flow. Sign-in pauses Steve. Run doctor afterward to refresh account state, then start to resume after authentication finishes. Grant Steve Full Disk Access in System Settings, then relaunch it. Messages Automation permission is established by an explicitly authorized first reply. Grant the separate Computer Use app its requested Screen Recording and Accessibility permissions. These system prompts cannot be silently approved by onboarding.
 
+See the [permissions table](../README.md#permissions-and-privacy) for each grant and its purpose. Phone control needs Steve's own Screen Recording and Accessibility permissions; a grant to Computer Use does not transfer to Steve. Video evidence needs Steve's Screen Recording permission, but basic iMessage replies do not.
+
 `setup --pair` returns a short-lived code and the receiving address. Send that code in a private iMessage to the displayed Mac account. Do not publish the output or paste passwords, one-time authentication codes, cookies, or payment details into the conversation. Pairing codes authorize one exact conversation and sender.
 
 `stop` pauses/cancels the operator; `start` resumes it. They do not quit or relaunch the menu-bar app. Use the app's Quit action to shut down cleanly.
@@ -65,6 +95,8 @@ steve phone --disconnect --json
 ```
 
 Once phone access is configured, ask Steve in the paired iMessage conversation for a phone-control link. If Steve is paused, first say "resume", then ask for the link. Steve sends a private, one-use Safari link that expires after two minutes. The link is not included in model inputs or Steve's SQLite outbox; it remains in your private Messages history. Requesting a link does not grant control or pause the worker; claiming it does. If delivery is uncertain or the link expires, ask for a new one.
+
+For a login, first ask Steve to open the site's sign-in page. After it confirms the page is ready, ask for a phone link, open it in Safari with Tailscale connected, and tap **Take control**. You are operating the same browser session on the Mac, so your successful login remains available there. Tailscale supplies the private network connection behind the URL; it is required on the phone even though the interface is a web page.
 
 The setup command uses an unused HTTPS port (8443 or 10000), preserves other Serve routes, and refuses a conflicting or publicly exposed Funnel route. Tailscale may require enabling HTTPS in your account before setup succeeds. The backend listens only on loopback. The link contains a short-lived secret: keep it private. You can also show a QR code from Steve’s connected-phone menu.
 

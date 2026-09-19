@@ -175,21 +175,11 @@ actor MessagesService {
     }
 
     private func discoverICloudAccount() -> String? {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
-        task.arguments = ["read", "MobileMeAccounts", "Accounts"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = Pipe()
-        do { try task.run(); task.waitUntilExit() } catch { return nil }
-        guard task.terminationStatus == 0 else { return nil }
-        let text = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let prefix = "AccountID = \""
-        return text.split(whereSeparator: \.isNewline).compactMap { line -> String? in
-            guard let start = line.range(of: prefix)?.upperBound,
-                  let end = line[start...].firstIndex(of: "\"") else { return nil }
-            let value = String(line[start..<end]).lowercased()
-            return value.contains("@") ? value : nil
-        }.first
+        // Read the native preference directly. Waiting for a defaults process
+        // before draining its pipe can hang onboarding on a large account list.
+        let accounts = UserDefaults(suiteName: "MobileMeAccounts")?.array(forKey: "Accounts") as? [[String: Any]] ?? []
+        return accounts.compactMap { $0["AccountID"] as? String }
+            .map { Self.normalizedAccountAddress($0).lowercased() }
+            .first { $0.contains("@") }
     }
 }

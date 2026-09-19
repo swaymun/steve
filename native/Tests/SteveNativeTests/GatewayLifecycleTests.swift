@@ -1,4 +1,5 @@
 import XCTest
+import SQLite
 @testable import SteveNative
 
 private final class FixtureClock: @unchecked Sendable {
@@ -15,6 +16,9 @@ private actor FixtureMessages: GatewayMessages {
     var sent: [String] = []
     var startedSends = 0
     var watchCount = 0
+    var watchCursors: [Int64?] = []
+    var watchedMessages: [SteveInboundMessage] = []
+    func replay(_ messages: [SteveInboundMessage]) { watchedMessages = messages }
     var failWatch = false
     var failSend = false
     var holdSending = false
@@ -27,10 +31,14 @@ private actor FixtureMessages: GatewayMessages {
     func currentRowID() -> Int64 { 0 }
     func watchMessages(sinceRowID: Int64?) async throws -> AsyncThrowingStream<SteveInboundMessage, Error> {
         watchCount += 1
+        watchCursors.append(sinceRowID)
         if holdWatching { await withCheckedContinuation { watchWaiter = $0 } }
         try Task.checkCancellation()
         if failWatch { throw RPCError(message: "fixture offline") }
-        return AsyncThrowingStream { _ in }
+        let unread = watchedMessages.filter { ($0.rowID ?? 0) > (sinceRowID ?? 0) }
+        return AsyncThrowingStream { continuation in
+            for message in unread { continuation.yield(message) }
+        }
     }
     func configure(failWatch: Bool = false, failSend: Bool = false) { self.failWatch = failWatch; self.failSend = failSend }
     func sendText(chatGUID: String, recipient: String, text: String, replyTo: String?) async throws {
@@ -123,6 +131,31 @@ final class GatewayLifecycleTests: XCTestCase {
     private func eventually(_ condition: @escaping () async throws -> Bool) async throws {
         for _ in 0..<150 { if try await condition() { return }; try await Task.sleep(for: .milliseconds(10)) }
         XCTFail("Condition did not become true")
+    }
+    func testIntakeWriteFailureReconnectsBeforeCheckpointCanSkipTheMessage() async throws {
+        let (store, gateway, messages, codex) = try await setup([])
+        try await store.savePaused(true)
+        let database = try Connection(store.databaseURL.path)
+        try database.execute("""
+            CREATE TRIGGER fail_fixture_intake BEFORE INSERT ON queue
+            WHEN NEW.id = 'inbound:retry-after-write-error'
+            BEGIN SELECT RAISE(ABORT, 'fixture write unavailable'); END;
+            """)
+        let first = inbound("retry-after-write-error")
+        let later = SteveInboundMessage(guid: "other-conversation", chatGuid: "unpaired", senderHandle: "other@example.test", text: "Ignore", isFromMe: false, isGroup: false, attachmentPaths: [], replyToGuid: nil, rowID: 43)
+        await messages.replay([first, later])
+        await gateway.start()
+        try await eventually { await messages.watchCount >= 2 }
+        let cursorBeforeRecovery = try await store.messageCursor()
+        XCTAssertEqual(cursorBeforeRecovery, 0, "A later chat must not checkpoint past an unsaved paired message")
+        try database.execute("DROP TRIGGER fail_fixture_intake")
+        try await eventually { try await store.messageCursor() == 43 }
+        let inbox = try await store.pendingInbox()
+        let cursors = await messages.watchCursors
+        let turns = await codex.turns
+        XCTAssertEqual(inbox.map(\.guid), [first.guid])
+        XCTAssertTrue(cursors.allSatisfy { $0 == 0 })
+        XCTAssertEqual(turns, 0)
     }
     func testServiceTierReachesBothThreadsAndEveryTurnIncludingResume() async throws {
         let plan = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Done"],"attachments":[]}"#

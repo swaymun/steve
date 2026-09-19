@@ -1,7 +1,96 @@
 import XCTest
+import SQLite
 @testable import SteveNative
 
 final class SteveControlTests: XCTestCase {
+    private func settingsRuntime() async throws -> (URL, SteveStore, SteveRuntime, Connection) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = try SteveStore(databaseURL: root.appendingPathComponent("fixture.sqlite3"))
+        try await store.saveSettings(Settings(displayName: "Fixture", model: "fixture-model", effort: "high", permissionProfile: ":workspace-write", workspaceRoot: root.path))
+        let connection = CodexRPCConnection(executable: URL(fileURLWithPath: "/usr/bin/true"), arguments: [], responseTimeout: 0.2)
+        let runtime = try SteveRuntime(store: store, messages: MessagesService(databasePath: root.appendingPathComponent("no-messages.sqlite3").path), codex: CodexAppServerClient(connection: connection))
+        return (root, store, runtime, try Connection(store.databaseURL.path))
+    }
+
+    func testFailedSettingsSaveRestoresPreparedBoundaryAndCanRetry() async throws {
+        let (root, store, runtime, database) = try await settingsRuntime()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try database.execute("""
+            CREATE TRIGGER fail_fixture_settings BEFORE INSERT ON settings
+            WHEN NEW.key = 'settings'
+            BEGIN SELECT RAISE(ABORT, 'fixture settings unavailable'); END;
+            """)
+        do { try await runtime.selectServiceTier("fast"); XCTFail("Settings write unexpectedly succeeded") } catch {}
+        let settingsAfterFailedSave = try await store.getSettings()
+        let snapshotAfterFailedSave = await runtime.snapshot()
+        let boundaryAfterFailedSave = await runtime.boundaryChangeIsActive()
+        XCTAssertEqual(settingsAfterFailedSave?.serviceTier, .standard)
+        XCTAssertEqual(snapshotAfterFailedSave.settings.serviceTier, .standard)
+        XCTAssertFalse(boundaryAfterFailedSave, "A prepared boundary may reopen on a failed settings save")
+
+        try database.execute("DROP TRIGGER fail_fixture_settings")
+        try await runtime.selectServiceTier("fast")
+        let settingsAfterRetry = try await store.getSettings()
+        let boundaryAfterRetry = await runtime.boundaryChangeIsActive()
+        XCTAssertEqual(settingsAfterRetry?.serviceTier, .fast)
+        XCTAssertFalse(boundaryAfterRetry)
+    }
+
+    func testFailedBoundaryInvalidationRemainsClosed() async throws {
+        let (root, store, runtime, database) = try await settingsRuntime()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try database.execute("""
+            CREATE TRIGGER fail_fixture_epoch BEFORE INSERT ON settings
+            WHEN NEW.key = 'gateway_epoch'
+            BEGIN SELECT RAISE(ABORT, 'fixture invalidation unavailable'); END;
+            """)
+        do { try await runtime.selectServiceTier("fast"); XCTFail("Boundary preparation unexpectedly succeeded") } catch {}
+        let settingsAfterFailedInvalidation = try await store.getSettings()
+        let boundaryAfterFailedInvalidation = await runtime.boundaryChangeIsActive()
+        XCTAssertEqual(settingsAfterFailedInvalidation?.serviceTier, .standard)
+        XCTAssertTrue(boundaryAfterFailedInvalidation, "A failed invalidation must remain fail-closed")
+    }
+
+    func testRepeatedSetupPreservesPendingWorkSchedulesAndBoundary() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try SteveStore(databaseURL: root.appendingPathComponent("fixture.sqlite3"))
+        let settings = Settings(displayName: "Fixture", model: "fixture-model", effort: "high", permissionProfile: ":workspace-write", workspaceRoot: root.path)
+        try await store.saveSettings(settings)
+        try await store.saveGatewayEpoch("original-boundary")
+        try await store.saveTrustedConversation(.init(chatGuid: "fixture-chat", senderHandle: "user@example.test"))
+        let message = SteveInboundMessage(guid: "queued", chatGuid: "fixture-chat", senderHandle: "user@example.test", text: "Read my project", isFromMe: false, isGroup: false, attachmentPaths: [], replyToGuid: nil)
+        _ = try await store.acceptInbound(message)
+        let automation = try SteveUserAutomationStore(databaseURL: store.databaseURL)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let authorization = try ScheduleAuthorization(chatGUID: message.chatGuid, senderHandle: message.senderHandle, workspace: root.path, permission: settings.permissionProfile!)
+        let provenance = ExplicitUserProvenance(source: .pairedMessage, sourceID: "reminder", statement: "Remind me to stretch", explicitlyRequested: true, recordedAt: now)
+        let schedule = try await automation.createSchedule(requestID: "reminder", name: "Stretch", prompt: "Stretch", kind: .reminder, rule: .once(at: now.addingTimeInterval(3600)), timeZone: "America/New_York", authorization: authorization, provenance: provenance, now: now)
+        // Any accidental App Server launch touches only this fixture marker.
+        let marker = root.appendingPathComponent("unexpected-codex-launch")
+        let connection = CodexRPCConnection(executable: URL(fileURLWithPath: "/usr/bin/touch"), arguments: [marker.path], responseTimeout: 0.2)
+        defer { connection.stop() }
+        let runtime = try SteveRuntime(store: store, messages: MessagesService(databasePath: root.appendingPathComponent("no-messages.sqlite3").path), codex: CodexAppServerClient(connection: connection))
+        let alias = root.appendingPathComponent("workspace-alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: root)
+        try await runtime.configureWorkspace(alias.path)
+        try await runtime.selectPermission("workspace-write")
+        try await runtime.selectModel(settings.model)
+        try await runtime.selectEffort(settings.effort)
+        try await runtime.selectServiceTier(settings.serviceTier.rawValue)
+        let epoch = try await store.gatewayEpoch()
+        let queued = try await store.queueState("inbound:queued")
+        let savedSchedule = try await automation.schedule(id: schedule.id)
+        let savedSettings = try await store.getSettings()
+        XCTAssertEqual(epoch, "original-boundary")
+        XCTAssertEqual(queued, "pending")
+        XCTAssertEqual(savedSchedule, schedule)
+        XCTAssertEqual(savedSettings?.permissionProfile, ":workspace-write")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+
     func testVideoWindowCLIRequiresGroundedScopedSelection() throws {
         let (inventory, json, _) = try SteveCLI.parse(["video", "windows", "--app", "com.apple.TextEdit", "--json"])
         XCTAssertEqual(inventory.options, ["action": "windows", "app": "com.apple.TextEdit"]); XCTAssertTrue(json)

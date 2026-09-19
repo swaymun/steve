@@ -30,7 +30,10 @@ if [ ! -d "$app" ]; then
   exit 1
 fi
 
-codesign --force --deep --options runtime --timestamp --sign "$identity" "$app"
+# Hardened runtime otherwise blocks the Apple Events used by Messages sending.
+# The entitlement permits the normal macOS consent flow; it does not grant it.
+codesign --force --deep --options runtime --timestamp \
+  --entitlements native/Resources/Steve.entitlements --sign "$identity" "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
 rm -f "$archive" "$archive.sha256"
 ditto -c -k --keepParent "$app" "$archive"

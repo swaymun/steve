@@ -215,7 +215,7 @@ actor GatewayCoordinator {
                 transportError = nil
                 for try await message in stream {
                     try Task.checkCancellation()
-                    await receive(message)
+                    guard await receive(message) else { throw RPCError(message: "Messages intake could not be saved; reconnecting from the last checkpoint.") }
                 }
                 if !Task.isCancelled { transportError = "Messages watcher disconnected; reconnecting." }
             } catch {
@@ -240,6 +240,9 @@ actor GatewayCoordinator {
     }
     @discardableResult
     func invalidate(cancelQueued: Bool = true, takeoverReservation reservation: String? = nil) async -> String {
+        await invalidateResult(cancelQueued: cancelQueued, takeoverReservation: reservation).epoch
+    }
+    private func invalidateResult(cancelQueued: Bool = true, takeoverReservation reservation: String? = nil) async -> (epoch: String, persisted: Bool) {
         capturePermit.invalidate()
         connectionHandoffToken = nil
         let invalidatedEpoch = UUID().uuidString
@@ -254,21 +257,45 @@ actor GatewayCoordinator {
         activeWorker = nil
         workTask?.cancel(); workTask = nil
         senderTask?.cancel(); senderTask = nil
+        var persisted = true
         do {
             if keepPaused { try await store.savePaused(true) }
             try await store.invalidateWork(cancelQueued: cancelQueued, epoch: invalidatedEpoch)
         }
-        catch { changingBoundary = true; transportError = error.localizedDescription }
+        catch { persisted = false; changingBoundary = true; transportError = error.localizedDescription }
         await codex.stop()
-        return invalidatedEpoch
+        return (invalidatedEpoch, persisted)
     }
     func beginBoundaryChange() async {
+        _ = await prepareBoundaryChange()
+    }
+    private func prepareBoundaryChange() async -> Bool {
         changingBoundary = true
-        await invalidate()
-        do { try await automation?.revokeScheduleAuthorization(now: clockNow()) }
-        catch { transportError = "Could not revoke schedule authorization: " + error.localizedDescription }
+        let invalidation = await invalidateResult()
+        guard invalidation.persisted else { return false }
+        do {
+            try await automation?.revokeScheduleAuthorization(now: clockNow())
+            return true
+        } catch {
+            transportError = "Could not revoke schedule authorization: " + error.localizedDescription
+            return false
+        }
+    }
+    func beginSettingsBoundaryChange() async throws {
+        guard await prepareBoundaryChange() else {
+            throw RPCError(message: transportError ?? "Could not prepare the settings boundary.")
+        }
+    }
+    func abortSettingsBoundaryChange(_ error: Error) {
+        // Invalidation and schedule revocation already succeeded, so the old
+        // persisted settings remain authoritative and may safely be retried.
+        // The caller surfaces the error. Do not leave a stale transport error
+        // after a later successful retry, or schedule work from this failure.
+        SteveLog.write("Could not save settings: " + error.localizedDescription)
+        changingBoundary = false
     }
     func endBoundaryChange() { changingBoundary = false; scheduleWork() }
+    func boundaryChangeIsActive() -> Bool { changingBoundary }
     func setPaused(_ value: Bool) async throws {
         guard value || (takeover == nil && takeoverReservation == nil) else {
             throw RPCError(message: "Finish phone control before resuming Steve.")
@@ -374,33 +401,38 @@ actor GatewayCoordinator {
         try Task.checkCancellation()
         guard running, epoch == captured, !changingBoundary, control || !paused else { throw CancellationError() }
     }
-    func receive(_ message: SteveInboundMessage) async {
+    @discardableResult
+    func receive(_ message: SteveInboundMessage) async -> Bool {
         do {
-            guard !message.isFromMe, !message.isGroup else { try await store.checkpoint(message.rowID); return }
+            guard !message.isFromMe, !message.isGroup else { try await store.checkpoint(message.rowID); return true }
             if let challenge = try await store.pairingChallenge(), challenge.expiresAtMs > UInt64(Date().timeIntervalSince1970 * 1000) {
                 let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if text.caseInsensitiveCompare(challenge.code) == .orderedSame || text.caseInsensitiveCompare("/pair " + challenge.code) == .orderedSame {
-                    guard !message.chatGuid.isEmpty, !normalizeHandle(message.senderHandle).isEmpty else { return }
+                    guard !message.chatGuid.isEmpty, !normalizeHandle(message.senderHandle).isEmpty else { return true }
                     await beginBoundaryChange()
                     try await store.saveTrustedConversation(.init(chatGuid: message.chatGuid, senderHandle: normalizeHandle(message.senderHandle)))
                     try await store.savePairingChallenge(nil)
                     endBoundaryChange()
-                    guard try await store.acceptInbound(message) else { return }
+                    guard try await store.acceptInbound(message) else { return true }
                     _ = try await store.claimInbox([message.guid])
                     let settings = try await store.getSettings() ?? defaultSettings()
                     try await stage(messages: [StevePrompt.pairingIntroduction(workspace: settings.workspaceRoot ?? StevePaths.workspaceDirectory.path)], attachments: [], inbound: [message], workspace: nil, permission: nil, epoch: epoch, control: true)
-                    scheduleWork(); return
+                    scheduleWork(); return true
                 }
             }
             guard let trusted = try await store.trustedConversation(), trusted.chatGuid == message.chatGuid, normalizeHandle(trusted.senderHandle) == normalizeHandle(message.senderHandle) else {
-                try await store.checkpoint(message.rowID); return
+                try await store.checkpoint(message.rowID); return true
             }
             var accepted = message
             if let (id, _) = phoneApproval(message.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), message: message) { accepted.approvalID = id }
-            guard try await store.acceptInbound(accepted) else { return }
+            guard try await store.acceptInbound(accepted) else { return true }
             _ = try await handleControl(accepted)
             scheduleWork()
-        } catch { SteveLog.write("Gateway intake failed error=\(error.localizedDescription)") }
+            return true
+        } catch {
+            SteveLog.write("Gateway intake failed error=\(error.localizedDescription)")
+            return false
+        }
     }
     private func handleControl(_ message: SteveInboundMessage) async throws -> Bool {
         let command = message.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -905,7 +937,7 @@ actor GatewayCoordinator {
                   normalizeHandle(trusted?.senderHandle ?? "") == normalizeHandle(delivery.message.senderHandle) else { throw CancellationError() }
             invokedTransport = true
             try await messages.sendText(chatGUID: delivery.message.chatGuid, recipient: delivery.message.senderHandle,
-                text: "Open this private one-use link in Safari promptly; it expires two minutes after your request. Opening it pauses Steve; sending the link does not. This link stays in your Messages history.\n" + delivery.url.absoluteString,
+                text: "With Tailscale connected on your phone, open this private one-use link in Safari and tap Take control. It expires in two minutes. Taking control pauses Steve. This link stays in your Messages history.\n" + delivery.url.absoluteString,
                 replyTo: delivery.message.guid)
             try await store.finishInbox(delivery.inboxGUIDs, state: "completed")
         } catch {
@@ -1092,9 +1124,10 @@ actor SteveRuntime {
     private var lastError: String?
 
     init() throws {
-        let store = try SteveStore.openDefault()
-        let messages = MessagesService()
-        let codex = CodexAppServerClient()
+        try self.init(store: SteveStore.openDefault(), messages: MessagesService(), codex: CodexAppServerClient())
+    }
+
+    init(store: SteveStore, messages: MessagesService, codex: CodexAppServerClient) throws {
         self.store = store
         self.messages = messages
         self.codex = codex
@@ -1180,52 +1213,67 @@ actor SteveRuntime {
     }
 
     func configureWorkspace(_ path: String) async throws {
+        guard path.hasPrefix("/") else { throw RPCError(message: "Choose an absolute workspace path.") }
         let url = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
+        guard settings.workspaceRoot != url.path else { return }
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        await gateway.beginBoundaryChange()
         var next = settings
         next.workspaceRoot = url.path
-        settings = next
-        do { try await store.saveSettings(next) } catch { throw error }
-        await gateway.endBoundaryChange()
+        try await saveSettingsAcrossBoundary(next)
         try await refresh()
     }
 
     func selectPermission(_ value: String) async throws {
         let value = value.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
         guard ["read-only", "workspace-write", "danger-full-access"].contains(value) else { throw RPCError(message: "Unsupported permission profile: \(value)") }
+        guard settings.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")) != value else { return }
         guard let workspace = settings.workspaceRoot else { throw RPCError(message: "Choose a workspace first.") }
         let catalog = try await codex.listPermissionProfiles(cwd: workspace)
         guard catalog.contains(where: { $0.id.trimmingCharacters(in: CharacterSet(charactersIn: ":")) == value && $0.allowed }) else { throw RPCError(message: "The selected permission profile is not available from Codex.") }
         permissions = catalog
-        await gateway.beginBoundaryChange()
-        settings.permissionProfile = value
-        try await store.saveSettings(settings)
-        await gateway.endBoundaryChange()
+        var next = settings
+        next.permissionProfile = value
+        try await saveSettingsAcrossBoundary(next)
     }
 
     func selectModel(_ value: String) async throws {
+        guard settings.model != value else { return }
         let catalog = try await codex.listModels()
         guard catalog.contains(where: { $0.id == value || $0.model == value }) else { throw RPCError(message: "The selected model is not available from Codex.") }
-        await gateway.beginBoundaryChange()
-        models = catalog; settings.model = value; try await store.saveSettings(settings)
-        await gateway.endBoundaryChange()
+        var next = settings
+        next.model = value
+        try await saveSettingsAcrossBoundary(next)
+        models = catalog
     }
     func selectEffort(_ value: String) async throws {
+        guard settings.effort != value else { return }
         let catalog = try await codex.listModels()
         guard let model = catalog.first(where: { $0.id == settings.model || $0.model == settings.model }), model.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == value }) else { throw RPCError(message: "This reasoning effort is not supported by the selected model.") }
-        await gateway.beginBoundaryChange()
-        models = catalog; settings.effort = value; try await store.saveSettings(settings)
-        await gateway.endBoundaryChange()
+        var next = settings
+        next.effort = value
+        try await saveSettingsAcrossBoundary(next)
+        models = catalog
     }
     func selectServiceTier(_ value: String) async throws {
         guard let tier = SteveServiceTier(rawValue: value) else { throw RPCError(message: "Choose standard or fast for service tier.") }
-        await gateway.beginBoundaryChange()
-        settings.serviceTier = tier
-        try await store.saveSettings(settings)
+        guard settings.serviceTier != tier else { return }
+        var next = settings
+        next.serviceTier = tier
+        try await saveSettingsAcrossBoundary(next)
+    }
+    private func saveSettingsAcrossBoundary(_ next: Settings) async throws {
+        try await gateway.beginSettingsBoundaryChange()
+        do {
+            try await store.saveSettings(next)
+        } catch {
+            await gateway.abortSettingsBoundaryChange(error)
+            throw error
+        }
+        settings = next
         await gateway.endBoundaryChange()
     }
     func setPaused(_ value: Bool) async throws { try await gateway.setPaused(value) }
+    func boundaryChangeIsActive() async -> Bool { await gateway.boundaryChangeIsActive() }
 
     func createPairing() async throws -> PairingSnapshot {
         let accounts = try await messages.discoverAccounts()
