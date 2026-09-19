@@ -1,0 +1,475 @@
+import Foundation
+import XCTest
+@testable import SteveNative
+
+final class CodexRPCConnectionTests: XCTestCase {
+    func testBrowserOriginApprovalRequiresAnEmptyObjectSchema() {
+        XCTAssertTrue(CodexApprovalRequest.isEmptyOriginSchema(["type": "object", "properties": [:], "additionalProperties": false]))
+        XCTAssertTrue(CodexApprovalRequest.isEmptyOriginSchema(["type": "object", "properties": [:], "required": []]))
+        let numericFlag = try! JSONSerialization.jsonObject(with: Data(#"{"type":"object","properties":{},"additionalProperties":0}"#.utf8))
+        XCTAssertFalse(CodexApprovalRequest.isEmptyOriginSchema(numericFlag))
+        for value: Any in [NSNull(), ["type": "object"], ["type": "object", "properties": ["secret": ["type": "string"]]], ["type": "object", "properties": [:], "required": ["approval"]], ["type": "object", "properties": [:], "additionalProperties": true], ["type": "object", "properties": [:], "allOf": []]] {
+            XCTAssertFalse(CodexApprovalRequest.isEmptyOriginSchema(value))
+        }
+    }
+
+    private func nativeApprovalParams() -> [String: Any] {
+        ["threadId": "t", "turnId": "u", "serverName": "computer-use", "mode": "form",
+         "message": "Allow Codex to use TextEdit?",
+         "requestedSchema": ["type": "object", "properties": [String: Any](), "additionalProperties": false],
+         "_meta": ["connector_id": "computer-use", "tool_name": "get_app_state", "persist": ["always"], "tool_params": ["app": "TextEdit"]]]
+    }
+
+    func testNativeAppApprovalRequiresExactEmptyFormAndMatchingMetadata() {
+        let valid = nativeApprovalParams()
+        XCTAssertEqual(CodexApprovalRequest.validatedNativeAppName(in: valid), "TextEdit")
+        var chatGPT = valid
+        chatGPT["message"] = "Allow ChatGPT to use TextEdit?"
+        XCTAssertEqual(CodexApprovalRequest.validatedNativeAppName(in: chatGPT), "TextEdit")
+        for (key, value): (String, Any) in [("mode", "url"), ("serverName", "other"), ("message", "Allow Codex to use TextEdit? extra"), ("message", "Allow Codex to use Text\nEdit?"), ("message", "Allow Codex to use ?"), ("unknown", true), ("requestedSchema", ["type": "object", "properties": ["secret": ["type": "string"]]])] {
+            var invalid = valid; invalid[key] = value
+            XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: invalid), "Unexpected acceptance for " + key)
+        }
+        for (key, value): (String, Any) in [("connector_id", "other"), ("tool_name", "click"), ("persist", ["session"]), ("persist", "always"), ("persist", ["always", "forever"]), ("unknown", true), ("persist", [String]()), ("persist", ["session"]), ("persist", NSNull()),
+            ("tool_params", ["app": "TextEdit", "command": "fixture"]),
+            ("tool_params_display", [["name": "app", "value": "TextEdit"], ["name": "command", "value": "fixture"]]),
+            ("tool_params", ["app": "Terminal"]), ("tool_params", ["app": "TextEdit", "command": "unsafe"])] {
+            var invalid = valid
+            var meta = invalid["_meta"] as! [String: Any]
+            meta[key] = value; invalid["_meta"] = meta
+            XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: invalid), "Unexpected metadata acceptance for " + key)
+        }
+        var ambiguous = valid
+        ambiguous["meta"] = valid["_meta"]
+        XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: ambiguous))
+    }
+
+    func testOfficialRawNativeAppFallbackWithoutSynthesizedMetadata() throws {
+        var raw = nativeApprovalParams()
+        raw["_meta"] = ["persist": ["always"]]
+        raw["requestedSchema"] = ["$schema": NSNull(), "type": "object", "properties": [String: Any](), "required": NSNull()]
+        XCTAssertEqual(CodexApprovalRequest.validatedNativeAppName(in: raw), "TextEdit")
+        for missing in ["threadId", "turnId"] {
+            var unbound = raw; unbound.removeValue(forKey: missing)
+            XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: unbound))
+        }
+        let rpc = try nativeApprovalEchoConnection(params: raw)
+        defer { rpc.stop() }
+        rpc.setApprovalHandler { request in
+            XCTAssertEqual(request.nativeAppName, "TextEdit")
+            XCTAssertNil(request.connector)
+            XCTAssertNil(request.tool)
+            return .accept
+        }
+        let echo = try XCTUnwrap(try rpc.request(method: "fixture") as? [String: Any])
+        let result = try XCTUnwrap(echo["result"] as? [String: Any])
+        let encoded = String(decoding: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), as: UTF8.self)
+        XCTAssertEqual(encoded, #"{"_meta":{"persist":"session"},"action":"accept","content":{}}"#)
+    }
+
+    private func modernNativeApprovalParams() -> [String: Any] {
+        ["threadId": "t", "turnId": "u", "mode": "form", "message": "Native tool needs approval",
+         "requestedSchema": ["$schema": NSNull(), "type": "object", "properties": [String: Any](), "required": NSNull()],
+         "_meta": ["codex_approval_kind": "mcp_tool_call", "codex_request_type": "approval_request",
+                   "connector_id": "connector_Computer_Use_fixture", "connector_name": "Computer Use",
+                   "tool_name": "get_app_state", "tool_title": "Get app state", "tool_params": ["app": "TextEdit"],
+                   "tool_params_display": [["name": "app", "display_name": "App", "value": "TextEdit"]], "persist": ["always"]]]
+    }
+
+    func testModernNativeMetadataDoesNotRequireLegacyServerOrMessageAndUsesSessionWire() throws {
+        let params = modernNativeApprovalParams()
+        XCTAssertEqual(CodexApprovalRequest.validatedNativeAppName(in: params), "TextEdit")
+        var minimal = params
+        minimal.removeValue(forKey: "message")
+        minimal["_meta"] = ["codex_approval_kind": "mcp_tool_call", "connector_id": "computer-use", "tool_params": ["app": "TextEdit"], "persist": ["always"]]
+        XCTAssertEqual(CodexApprovalRequest.validatedNativeAppName(in: minimal), "TextEdit")
+        var displayOnly = params
+        var meta = displayOnly["_meta"] as! [String: Any]
+        meta["tool_params"] = [String: Any]()
+        displayOnly["_meta"] = meta
+        XCTAssertEqual(CodexApprovalRequest.validatedNativeAppName(in: displayOnly), "TextEdit")
+        let rpc = try nativeApprovalEchoConnection(params: params)
+        defer { rpc.stop() }
+        rpc.setApprovalHandler { request in XCTAssertEqual(request.nativeAppName, "TextEdit"); return .accept }
+        let echo = try XCTUnwrap(try rpc.request(method: "fixture") as? [String: Any])
+        let result = try XCTUnwrap(echo["result"] as? [String: Any])
+        XCTAssertEqual(String(decoding: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), as: UTF8.self), #"{"_meta":{"persist":"session"},"action":"accept","content":{}}"#)
+    }
+
+    func testModernNativeRejectsConflictingIdentitiesUnsupportedToolsAndNonAppRequests() {
+        let valid = modernNativeApprovalParams()
+        for (key, value): (String, Any) in [
+            ("codex_approval_kind", "other"), ("codex_request_type", "other"), ("connector_id", "browser-use"),
+            ("connector_id", "computer-useful"), ("tool_name", "run_script"), ("persist", ["forever"]),
+            ("persist", [String]()), ("persist", ["session"]), ("persist", NSNull()),
+            ("tool_params", ["app": "TextEdit", "command": "fixture"]),
+            ("tool_params_display", [["name": "app", "value": "TextEdit"], ["name": "command", "value": "fixture"]]),
+            ("tool_params", ["app": "Terminal"]), ("tool_params", ["app": 42]),
+            ("tool_params_display", [["name": "app", "value": "Terminal"]]),
+            ("tool_params_display", [["name": "app", "value": "TextEdit"], ["name": "app", "value": "TextEdit"]]),
+            ("tool_params_display", [["name": "app", "value": ["secret": "fixture"]]]),
+            ("tool_params_display", [["name": "app", "value": "TextEdit", "unexpected": true]])
+        ] {
+            var invalid = valid
+            var meta = invalid["_meta"] as! [String: Any]
+            meta[key] = value; invalid["_meta"] = meta
+            XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: invalid), "Unexpected acceptance for " + key)
+        }
+        var noPersist = valid
+        var noPersistMeta = valid["_meta"] as! [String: Any]
+        noPersistMeta.removeValue(forKey: "persist"); noPersist["_meta"] = noPersistMeta
+        XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: noPersist))
+        var nonApp = valid
+        nonApp["_meta"] = ["codex_approval_kind": "mcp_tool_call", "connector_id": "computer-use", "tool_params": ["url": "https://example.invalid"]]
+        XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: nonApp))
+        for missing in ["threadId", "turnId"] {
+            var invalid = valid; invalid.removeValue(forKey: missing)
+            XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: invalid))
+        }
+        var form = valid
+        form["requestedSchema"] = ["type": "object", "properties": ["password": ["type": "string"]]]
+        XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: form))
+    }
+
+    func testModernNativeBundleDisplayIdentityRequiresExactInstalledMetadata() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let app = root.appendingPathComponent("Fixture.app")
+        let contents = app.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let info: [String: Any] = ["CFBundleIdentifier": "com.apple.TextEdit", "CFBundleName": "TextEdit", "CFBundleDisplayName": "Localized TextEdit", "CFBundlePackageType": "APPL"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: contents.appendingPathComponent("Info.plist"))
+        var params = modernNativeApprovalParams()
+        var meta = params["_meta"] as! [String: Any]
+        meta["tool_params"] = ["app": "com.apple.TextEdit"]
+        meta["opaque_extension"] = ["private": "never reflect this"]
+        params["_meta"] = meta
+        let resolver: (String) -> URL? = { id in XCTAssertEqual(id, "com.apple.TextEdit"); return app }
+        XCTAssertEqual(CodexApprovalRequest.validatedNativeAppName(in: params, resolveApplication: resolver), "TextEdit")
+        XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: params, resolveApplication: { _ in nil }))
+        meta["tool_params_display"] = [["name": "app", "value": "Localized TextEdit"]]
+        params["_meta"] = meta
+        XCTAssertEqual(CodexApprovalRequest.validatedNativeAppName(in: params, resolveApplication: resolver), "Localized TextEdit")
+        meta["tool_params_display"] = [["name": "app", "value": "Other App"]]
+        params["_meta"] = meta
+        XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: params, resolveApplication: resolver))
+        meta["tool_params"] = ["app": "com.other.TextEdit"]
+        meta["tool_params_display"] = [["name": "app", "value": "TextEdit"]]
+        params["_meta"] = meta
+        XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: params, resolveApplication: { _ in app }))
+    }
+
+    func testModernNativeUnknownMetadataHasNoResponseAuthority() throws {
+        var params = modernNativeApprovalParams()
+        var meta = params["_meta"] as! [String: Any]
+        meta["opaque_extension"] = ["action": "always", "secret": "fixture-private"]
+        meta["opaque_extension_two"] = "fixture-private-two"
+        params["_meta"] = meta
+        XCTAssertEqual(CodexApprovalRequest.validatedNativeAppName(in: params), "TextEdit")
+        let rpc = try nativeApprovalEchoConnection(params: params)
+        defer { rpc.stop() }
+        rpc.setApprovalHandler { request in XCTAssertEqual(request.nativeAppName, "TextEdit"); return .accept }
+        let echo = try XCTUnwrap(try rpc.request(method: "fixture") as? [String: Any])
+        let result = try XCTUnwrap(echo["result"] as? [String: Any])
+        XCTAssertEqual(String(decoding: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), as: UTF8.self), #"{"_meta":{"persist":"session"},"action":"accept","content":{}}"#)
+    }
+
+    func testNativeApprovalShapeDiagnosticsExcludeArbitraryValuesAndBoundOutput() {
+        var params = modernNativeApprovalParams()
+        params["message"] = "private prompt https://secret.invalid/token"
+        var meta = params["_meta"] as! [String: Any]
+        meta["connector_name"] = "private connector"
+        meta["sensitive_identifier_shaped_key"] = "private key value"
+        meta["tool_params"] = ["app": "com.apple.TextEdit", "command": "private command", "token": "private token"]
+        meta["tool_params_display"] = [["name": "app", "value": "TextEdit"], ["name": "private display name", "value": "private display value"]]
+        params["_meta"] = meta
+        let shape = CodexApprovalRequest.nativeApprovalShape(in: params)
+        XCTAssertTrue(shape.contains("tool=get_app_state"))
+        XCTAssertTrue(shape.contains("parameterApp=string"))
+        XCTAssertTrue(shape.contains("app=string"))
+        XCTAssertTrue(shape.contains("appIdentitiesMatch=false"))
+        XCTAssertTrue(shape.contains("command:string"))
+        XCTAssertFalse(shape.contains("TextEdit"))
+        XCTAssertFalse(shape.contains("private"))
+        XCTAssertFalse(shape.contains("secret.invalid"))
+        XCTAssertFalse(shape.contains("sensitive_identifier_shaped_key"))
+        meta["tool_name"] = "https://secret.invalid/token"
+        meta["tool_params_display"] = Array(repeating: ["name": "app", "value": "sensitive"], count: 200)
+        params["_meta"] = meta
+        let bounded = CodexApprovalRequest.nativeApprovalShape(in: params)
+        XCTAssertFalse(bounded.contains("secret"))
+        XCTAssertFalse(bounded.contains("sensitive"))
+        XCTAssertLessThan(bounded.utf8.count, 2500)
+        XCTAssertTrue(bounded.contains("displayCount=99"))
+    }
+
+    private func nativeApprovalEchoConnection(params: [String: Any], approvalTimeout: TimeInterval = 1) throws -> CodexRPCConnection {
+        let request = ["id": "approval", "method": "mcpServer/elicitation/request", "params": params] as [String: Any]
+        let text = String(decoding: try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys]), as: UTF8.self)
+        let quoted = "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let script = """
+        read -r first
+        printf '%s\\n' \(quoted)
+        read -r answer
+        printf '{"id":1,"result":%s}\\n' "$answer"
+        read -r hold
+        """
+        return CodexRPCConnection(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", script], responseTimeout: 2, eventTimeout: 2, approvalTimeout: approvalTimeout)
+    }
+
+    func testAcceptedNativeAppApprovalWritesExactSessionOnlyWireResponse() throws {
+        let rpc = try nativeApprovalEchoConnection(params: nativeApprovalParams())
+        defer { rpc.stop() }
+        rpc.setApprovalHandler { request in
+            XCTAssertEqual(request.nativeAppName, "TextEdit")
+            XCTAssertEqual(request.threadID, "t")
+            XCTAssertEqual(request.turnID, "u")
+            return .accept
+        }
+        let echo = try XCTUnwrap(try rpc.request(method: "fixture") as? [String: Any])
+        let result = try XCTUnwrap(echo["result"] as? [String: Any])
+        let encoded = String(decoding: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), as: UTF8.self)
+        XCTAssertEqual(encoded, #"{"_meta":{"persist":"session"},"action":"accept","content":{}}"#)
+        XCTAssertFalse(encoded.contains("always"))
+    }
+
+    func testNativeAutomaticTimeoutAndMissingHandlerCancelWithoutPersistence() throws {
+        for withHandler in [false, true] {
+            let rpc = try nativeApprovalEchoConnection(params: nativeApprovalParams(), approvalTimeout: 0.05)
+            defer { rpc.stop() }
+            if withHandler {
+                rpc.setApprovalHandler { _ in
+                    try? await Task.sleep(for: .seconds(1))
+                    return .accept
+                }
+            }
+            let echo = try XCTUnwrap(try rpc.request(method: "fixture") as? [String: Any])
+            let result = try XCTUnwrap(echo["result"] as? [String: String])
+            XCTAssertEqual(result, ["action": "cancel"])
+        }
+    }
+
+    func testUnknownNativeFormCannotBecomeGrantFromGenericAcceptHandler() throws {
+        var params = nativeApprovalParams()
+        params["requestedSchema"] = ["type": "object", "properties": ["password": ["type": "string"]]]
+        let rpc = try nativeApprovalEchoConnection(params: params)
+        defer { rpc.stop() }
+        rpc.setApprovalHandler { request in XCTAssertNil(request.nativeAppName); return .accept }
+        let echo = try XCTUnwrap(try rpc.request(method: "fixture") as? [String: Any])
+        XCTAssertEqual(echo["result"] as? [String: String], ["action": "cancel"])
+    }
+
+    private func connection(_ script: String, timeout: TimeInterval = 1) -> CodexRPCConnection {
+        CodexRPCConnection(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", script], responseTimeout: timeout, eventTimeout: timeout)
+    }
+
+    func testLateControlResponseIsReadAfterTurnCompletion() async throws {
+        let rpc = connection(#"""
+        read -r first
+        printf '%s\n' '{"id":1,"result":{}}' '{"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed"}}}'
+        read -r control
+        printf '%s\n' '{"id":2,"result":{"acknowledged":true}}'
+        read -r hold
+        """#)
+        defer { rpc.stop() }
+        _ = try rpc.request(method: "fixture")
+        _ = try await rpc.waitForTurn(threadID: "t", turnID: "u")
+        let response = try rpc.requestWhileStreaming(method: "turn/interrupt") as? [String: Bool]
+        XCTAssertEqual(response?["acknowledged"], true)
+    }
+
+    func testFailedTurnCannotReturnPriorAgentTextAsSuccess() async throws {
+        let rpc = connection(#"""
+        read -r first
+        printf '%s\n' '{"id":1,"result":{}}' '{"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"id":"i","type":"agentMessage","phase":"final_answer","text":"done"}}}' '{"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"failed","error":{"message":"sensitive provider detail"}}}}'
+        read -r hold
+        """#)
+        defer { rpc.stop() }
+        _ = try rpc.request(method: "fixture")
+        do {
+            _ = try await rpc.waitForTurn(threadID: "t", turnID: "u")
+            XCTFail("A failed protocol turn must throw")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("failed"))
+            XCTAssertFalse(error.localizedDescription.contains("sensitive"))
+        }
+    }
+
+    func testEOFSettlesPendingRequest() {
+        let rpc = connection("read -r first\nexit 0", timeout: 2)
+        defer { rpc.stop() }
+        let start = Date()
+        XCTAssertThrowsError(try rpc.request(method: "fixture"))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1)
+    }
+
+    func testEOFSettlesTurnWaiter() async throws {
+        let rpc = connection(#"""
+        read -r first
+        printf '%s\n' '{"id":1,"result":{}}'
+        exit 0
+        """#)
+        defer { rpc.stop() }
+        _ = try rpc.request(method: "fixture")
+        do {
+            _ = try await rpc.waitForTurn(threadID: "t", turnID: "u")
+            XCTFail("EOF must fail an unfinished turn")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("exited")) }
+    }
+
+    func testRequestDeadlineIsBounded() {
+        let rpc = connection("read -r first\nread -r hold", timeout: 0.1)
+        defer { rpc.stop() }
+        let start = Date()
+        XCTAssertThrowsError(try rpc.request(method: "fixture")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("timed out"))
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1)
+    }
+
+    func testStopWakesBlockedRequestAndControlCannotRestartIt() async {
+        let rpc = connection("read -r first\nread -r hold", timeout: 5)
+        let began = expectation(description: "request began")
+        let ended = expectation(description: "request ended")
+        DispatchQueue.global().async {
+            began.fulfill()
+            do {
+                _ = try rpc.request(method: "fixture")
+                XCTFail("Stopped request should fail")
+            } catch { }
+            ended.fulfill()
+        }
+        await fulfillment(of: [began], timeout: 1)
+        // Wait for launch, rather than depending on a fixed sleep.
+        let deadline = Date().addingTimeInterval(1)
+        while !rpc.isRunning && Date() < deadline { await Task.yield() }
+        XCTAssertTrue(rpc.isRunning)
+        rpc.stop()
+        await fulfillment(of: [ended], timeout: 1)
+        XCTAssertThrowsError(try rpc.requestWhileStreaming(method: "turn/interrupt"))
+        XCTAssertFalse(rpc.isRunning)
+    }
+
+    func testUnpresentedElicitationsCancelWithoutSavingAUserDenial() throws {
+        for metadata in [#""mode":"url","url":"https://example.invalid/authorize""#,
+                         #""mode":"form","_meta":{"connector_id":"computer-use","tool_name":"click"}"#] {
+            let script = """
+            read -r first
+            printf '%s\\n' '{"id":"approval","method":"mcpServer/elicitation/request","params":{\(metadata)}}'
+            read -r answer
+            case "$answer" in
+              *cancel*) printf '%s\\n' '{"id":1,"result":{"declined":true}}' ;;
+              *) printf '%s\\n' '{"id":1,"result":{"declined":false}}' ;;
+            esac
+            read -r hold
+            """
+            let rpc = connection(script)
+            defer { rpc.stop() }
+            let result = try rpc.request(method: "fixture") as? [String: Bool]
+            XCTAssertEqual(result?["declined"], true)
+        }
+    }
+
+    func testApprovalHookCannotBlockRPCReader() throws {
+        let rpc = connection(#"""
+        read -r first
+        printf '%s\n' '{"id":"approval","method":"mcpServer/elicitation/request","params":{"threadId":"t","turnId":"u","mode":"url","url":"https://example.invalid/auth"}}' '{"id":1,"result":{"responsive":true}}'
+        read -r answer
+        read -r hold
+        """#)
+        defer { rpc.stop() }
+        rpc.setApprovalHandler { request in
+            XCTAssertEqual(request.threadID, "t")
+            XCTAssertEqual(request.turnID, "u")
+            return .decline
+        }
+        let result = try rpc.request(method: "fixture") as? [String: Bool]
+        XCTAssertEqual(result?["responsive"], true)
+    }
+
+    func testEnvironmentDoesNotInheritAnotherTaskRouting() {
+        let clean = CodexComputerUseRuntime.sanitizedEnvironment([
+            "CODEX_APP_TOOLS_PIPE_PATH": "stale", "CODEX_SESSION_ID": "stale",
+            "CODEX_THREAD_ID": "stale", "PATH": "/usr/bin", "CODEX_HOME": "/fixture/.codex"
+        ])
+        XCTAssertNil(clean["CODEX_APP_TOOLS_PIPE_PATH"])
+        XCTAssertNil(clean["CODEX_SESSION_ID"])
+        XCTAssertNil(clean["CODEX_THREAD_ID"])
+        XCTAssertEqual(clean["PATH"], "/usr/bin")
+        XCTAssertEqual(clean["CODEX_HOME"], "/fixture/.codex")
+    }
+
+    func testStructuredEmptyArtifactsNeverSelectAnOldWorkspaceFile() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("unrelated".utf8).write(to: root.appendingPathComponent("old.pdf"))
+        let text = #"{"schemaVersion":1,"kind":"worker_result","status":"blocked","summary":"No report produced","artifacts":[]}"#
+        let result = CodexTurnResult(text: text, attachmentPaths: [])
+            .resolvingWorkspaceFiles(in: root.path)
+            .resolvingRequestedWorkspaceFile(in: root.path, request: "send me the PDF")
+        XCTAssertEqual(result.text, text)
+        XCTAssertTrue(result.attachments.isEmpty)
+    }
+
+    func testInlineMediaMaterializesInsideWorkspaceAndRejectsSymlinkRoot() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root); try? FileManager.default.removeItem(at: outside) }
+        let url = "data:audio/wav;base64," + Data("audio fixture".utf8).base64EncodedString()
+        let path = try XCTUnwrap(CodexTurnResult.materializeDataURL(url, workspace: root.path))
+        XCTAssertTrue(path.hasPrefix(root.path + "/.steve-artifacts/"))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), Data("audio fixture".utf8))
+        try FileManager.default.removeItem(at: root.appendingPathComponent(".steve-artifacts"))
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent(".steve-artifacts"), withDestinationURL: outside)
+        XCTAssertNil(CodexTurnResult.materializeDataURL(url, workspace: root.path))
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: outside.path).isEmpty)
+    }
+
+    func testStructuredDataURLIsNotRemovedFromJSON() {
+        let text = #"{"kind":"worker_result","summary":"data:image/png;base64,YQ==","artifacts":[]}"#
+        XCTAssertEqual(CodexTurnResult(text: text, attachmentPaths: []).text, text)
+    }
+    func testRelayOutgoingConfigDisablesDiscoveredToolsWithoutChangingWorker() async throws {
+        let overrides = CodexAppServerClient.relayToolOverrides(effectiveConfig: [
+            "mcp_servers": ["computer-use": [:], "custom.service": [:]],
+            "plugins": ["fixture@local": [:]],
+            "apps": ["fixture-app": [:]]
+        ])
+        let client = CodexAppServerClient()
+        let relay = try await client.threadParams(cwd: "/fixture", permissionProfile: "read-only", model: "fixture", developerInstructions: "relay", toolOverrides: overrides)
+        let relayConfig = try XCTUnwrap(relay["config"] as? [String: Any])
+        XCTAssertEqual(((relayConfig["mcp_servers"] as? [String: Any])?["computer-use"] as? [String: Bool])?["enabled"], false)
+        XCTAssertEqual(((relayConfig["mcp_servers"] as? [String: Any])?["custom.service"] as? [String: Bool])?["enabled"], false)
+        XCTAssertEqual(((relayConfig["plugins"] as? [String: Any])?["fixture@local"] as? [String: Bool])?["enabled"], false)
+        XCTAssertEqual(((relayConfig["apps"] as? [String: Any])?["fixture-app"] as? [String: Bool])?["enabled"], false)
+        XCTAssertEqual(relayConfig["features.shell_tool"] as? Bool, false)
+        XCTAssertEqual(relayConfig["web_search"] as? String, "disabled")
+        let worker = try await client.threadParams(cwd: "/fixture", permissionProfile: "workspace-write", model: "fixture", developerInstructions: "worker")
+        let workerConfig = try XCTUnwrap(worker["config"] as? [String: Any])
+        XCTAssertNil(workerConfig["mcp_servers"])
+        XCTAssertNil(workerConfig["features.shell_tool"])
+        XCTAssertEqual(worker["approvalPolicy"] as? String, "on-request")
+    }
+
+    func testCommandAndFileApprovalsDeclineWithoutProtocolFailure() throws {
+        for method in ["item/commandExecution/requestApproval", "item/fileChange/requestApproval"] {
+            let rpc = connection("""
+            read -r first
+            printf '%s\\n' '{"id":"approval","method":"\(method)","params":{"threadId":"t","turnId":"u"}}'
+            read -r answer
+            case "$answer" in
+              *decision*decline*) printf '%s\\n' '{"id":1,"result":{"declined":true}}' ;;
+              *) printf '%s\\n' '{"id":1,"result":{"declined":false}}' ;;
+            esac
+            read -r hold
+            """)
+            defer { rpc.stop() }
+            let response = try rpc.request(method: "fixture") as? [String: Bool]
+            XCTAssertEqual(response?["declined"], true)
+        }
+    }
+
+}

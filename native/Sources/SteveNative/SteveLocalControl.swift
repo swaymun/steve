@@ -1,0 +1,248 @@
+import AppKit
+import ApplicationServices
+import Darwin
+import Foundation
+
+struct SteveControlRequest: Codable, Sendable {
+    let command: String
+    var options: [String: String] = [:]
+}
+
+struct SteveSetupCheck: Codable, Sendable {
+    let name: String
+    let state: String
+    let detail: String
+    var required: Bool = true
+}
+
+struct SteveControlResponse: Codable, Sendable {
+    let state: String
+    let summary: String
+    var checks: [SteveSetupCheck] = []
+    var values: [String: String] = [:]
+}
+
+/// Local CLI requests execute inside the user-session app, which owns TCC
+/// permissions and the single gateway. The CLI never opens the Messages DB.
+enum SteveControl {
+    static func handle(_ request: SteveControlRequest, runtime: SteveRuntime) async -> SteveControlResponse {
+        var applied: [String] = []
+        do {
+            var values: [String: String] = [:]
+            switch request.command {
+            case "status": break
+            case "doctor": try await runtime.refresh()
+            case "approval":
+                if let approval = await runtime.pendingApproval() {
+                    return SteveControlResponse(state: "needs_user_action", summary: approval.message, values: [
+                        "approvalID": approval.id,
+                        "originHost": approval.originHost ?? "",
+                        "connector": approval.connector ?? "",
+                        "tool": approval.tool ?? "",
+                        "expiresAt": ISO8601DateFormatter().string(from: approval.expiresAt)
+                    ])
+                }
+                return SteveControlResponse(state: "ready", summary: "No approval is pending.")
+            case "approve", "deny":
+                guard let id = request.options["id"], request.options.count == 1 else { throw RPCError(message: "Specify the current approval ID from the approval command.") }
+                try await runtime.resolveApproval(id: id, decision: request.command == "approve" ? .accept : .decline)
+            case "start": try await runtime.setPaused(false)
+            case "stop": try await runtime.setPaused(true)
+            case "setup":
+                let allowed: Set<String> = ["workspace", "permission", "model", "effort", "login", "pair", "tailscale-connect", "phone-access"]
+                guard Set(request.options.keys).isSubset(of: allowed) else {
+                    throw RPCError(message: "Unknown setup option; no changes were applied.")
+                }
+                // Validate configuration choices before applying them. Account
+                // sign-in and pairing are resumable steps, not one transaction.
+                let snapshot = await runtime.snapshot()
+                if let value = request.options["permission"], !["read-only", "workspace-write", "danger-full-access"].contains(value) {
+                    throw RPCError(message: "Choose read-only, workspace-write, or danger-full-access.")
+                }
+                if let value = request.options["model"], !snapshot.models.contains(where: { $0.id == value }) {
+                    throw RPCError(message: "Model is not in the signed-in account's current catalog.")
+                }
+                let selected = request.options["model"] ?? snapshot.settings.model
+                if let value = request.options["effort"], !snapshot.models.contains(where: { $0.id == selected && $0.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == value }) }) {
+                    throw RPCError(message: "Reasoning effort is not supported by the selected model.")
+                }
+                if let value = request.options["workspace"] {
+                    guard value.hasPrefix("/"), !value.contains("\0") else { throw RPCError(message: "Workspace must be an absolute path.") }
+                    try await runtime.configureWorkspace(value)
+                    applied.append("workspace")
+                }
+                if let value = request.options["permission"] { try await runtime.selectPermission(value); applied.append("permission") }
+                if let value = request.options["model"] { try await runtime.selectModel(value); applied.append("model") }
+                if let value = request.options["effort"] { try await runtime.selectEffort(value); applied.append("effort") }
+                if request.options["login"] == "true" {
+                    let login = try await runtime.loginStart()
+                    values["authURL"] = login.authURL
+                }
+                if request.options["pair"] == "true" {
+                    let pair = try await runtime.createPairing()
+                    values["pairingCode"] = pair.challenge?.code
+                    values["messagesURL"] = pair.challenge?.messageURI
+                    values["receiveAddress"] = pair.challenge?.receiveAddress
+                }
+            default: throw RPCError(message: "Unsupported control command.")
+            }
+            let snapshot = await runtime.snapshot()
+            var checks = [
+                SteveSetupCheck(name: "codex_account", state: snapshot.status.connected ? "ready" : "needs_user_action", detail: snapshot.status.connected ? "Codex account connected." : "Run setup --login, then finish the returned URL in your browser."),
+                SteveSetupCheck(name: "workspace", state: snapshot.settings.workspaceRoot == nil ? "needs_user_action" : "ready", detail: snapshot.settings.workspaceRoot ?? "Choose a workspace with setup --workspace /absolute/path."),
+                SteveSetupCheck(name: "permissions", state: snapshot.settings.permissionProfile == nil ? "needs_user_action" : "ready", detail: snapshot.settings.permissionProfile ?? "Choose setup --permission read-only, workspace-write, or danger-full-access."),
+                SteveSetupCheck(name: "phone", state: snapshot.trustedConversation == nil ? "needs_user_action" : "ready", detail: snapshot.trustedConversation == nil ? "Run setup --pair and send the displayed code from the phone." : "An exact private Messages conversation is paired."),
+                SteveSetupCheck(name: "operator", state: snapshot.paused ? "blocked" : "ready", detail: snapshot.paused ? "Paused. Run start to resume." : "Enabled.")
+            ]
+            for dependency in snapshot.dependencies {
+                checks.append(SteveSetupCheck(name: dependency.name, state: dependency.available ? "ready" : "blocked", detail: dependency.detail))
+            }
+            if snapshot.status.state != "Ready", !snapshot.paused {
+                checks.append(SteveSetupCheck(name: "runtime", state: "needs_user_action", detail: snapshot.status.detail))
+            }
+            if request.command == "doctor" || request.command == "setup" {
+                let network = await TailscaleSetup.check(connect: request.options["tailscale-connect"] == "true")
+                checks.append(network.0)
+                values["tailscaleAuthURL"] = network.1
+                checks.append(SteveSetupCheck(name: "computer_use", state: CodexComputerUseRuntime.discover() == nil ? "needs_user_action" : "unverified", detail: "Install and enable the official Computer Use plugin in ChatGPT/Codex. Executable discovery alone does not verify its permissions or a live session."))
+                let chrome = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") != nil
+                checks.append(SteveSetupCheck(name: "chrome", state: chrome ? "ready" : "needs_user_action", detail: chrome ? "Google Chrome installed; its existing profile is used." : "Install Google Chrome for browser tasks."))
+                checks.append(SteveSetupCheck(name: "steve_screen_recording", state: CGPreflightScreenCaptureAccess() ? "ready" : "needs_user_action", detail: "Steve's own Screen Recording grant is needed for phone takeover. This does not check the separate Computer Use plugin's grant.", required: false))
+                checks.append(SteveSetupCheck(name: "steve_accessibility", state: AXIsProcessTrusted() ? "ready" : "needs_user_action", detail: "Steve's own Accessibility grant is needed for phone input. This does not check the separate Computer Use plugin's grant.", required: false))
+                do {
+                    let accounts = try await runtime.messages.discoverAccounts()
+                    checks.append(SteveSetupCheck(name: "messages", state: accounts.isEmpty ? "needs_user_action" : "ready", detail: accounts.isEmpty ? "Sign in to Messages on this Mac." : "Messages database is readable and a local account was discovered. Sending Automation permission is verified by an authorized live reply."))
+                } catch {
+                    checks.append(SteveSetupCheck(name: "messages", state: "needs_user_action", detail: "Enable Steve under Full Disk Access and relaunch it; then sign in to Messages."))
+                }
+            }
+            let state = checks.contains(where: { $0.required && $0.state == "blocked" }) ? "blocked" : checks.contains(where: { $0.required && $0.state != "ready" }) ? "needs_user_action" : "ready"
+            return SteveControlResponse(state: state, summary: snapshot.status.detail.isEmpty ? (snapshot.paused ? "Steve is paused." : "Steve is running.") : snapshot.status.detail, checks: checks, values: values)
+        } catch {
+            return SteveControlResponse(state: "failed", summary: error.localizedDescription, values: applied.isEmpty ? [:] : ["applied": applied.joined(separator: ","), "nextStep": "These settings were saved before the later step failed. Run status and resume the remaining setup step."])
+        }
+    }
+}
+
+enum SteveControlSocket {
+    static var directory: URL { StevePaths.dataDirectory.appendingPathComponent("control", isDirectory: true) }
+    static var path: String { directory.appendingPathComponent("socket").path }
+    static let maxBytes = 65_536
+
+    static func address(_ path: String) throws -> sockaddr_un {
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8) + [0]
+        guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { throw RPCError(message: "Local control socket path is too long.") }
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: bytes) }
+        return address
+    }
+
+    static func configure(_ fd: Int32) {
+        var timeout = timeval(tv_sec: 75, tv_usec: 0)
+        withUnsafePointer(to: &timeout) {
+            _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, $0, socklen_t(MemoryLayout<timeval>.size))
+            _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, $0, socklen_t(MemoryLayout<timeval>.size))
+        }
+        var enabled: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
+    }
+
+    static func read(_ fd: Int32) throws -> Data {
+        var result = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = recv(fd, &buffer, buffer.count, 0)
+            if count == 0 { return result }
+            guard count > 0 else {
+                if errno == EINTR { continue }
+                throw RPCError(message: "Local request timed out or disconnected. A requested change may have completed; check status before retrying.")
+            }
+            guard result.count + count <= maxBytes else { throw RPCError(message: "Local request exceeded the size limit.") }
+            result.append(contentsOf: buffer.prefix(count))
+        }
+    }
+
+    static func write(_ data: Data, fd: Int32) throws {
+        guard data.count <= maxBytes else { throw RPCError(message: "Local response exceeded the size limit.") }
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = send(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset, 0)
+                guard count > 0 else { if errno == EINTR { continue }; throw RPCError(message: "Local connection closed.") }
+                offset += count
+            }
+        }
+    }
+
+    static func request(_ request: SteveControlRequest, path: String = path) throws -> SteveControlResponse {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw RPCError(message: "Could not open local control socket.") }
+        defer { close(fd) }
+        configure(fd)
+        var address = try address(path)
+        let connected = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }
+        guard connected == 0 else { throw RPCError(message: "Steve is not running. Open the installed Steve.app, then retry. CLI commands use its permissions and existing session.") }
+        var uid: uid_t = 0, gid: gid_t = 0
+        guard getpeereid(fd, &uid, &gid) == 0, uid == getuid() else { throw RPCError(message: "Local control peer is not the current user.") }
+        try write(JSONEncoder().encode(request), fd: fd)
+        shutdown(fd, SHUT_WR)
+        return try JSONDecoder().decode(SteveControlResponse.self, from: read(fd))
+    }
+}
+
+final class SteveLocalControlServer: @unchecked Sendable {
+    private let listener: Int32
+    private let ownership: Int32
+    private let path: String
+
+    init(path: String = SteveControlSocket.path, handler: @escaping @Sendable (SteveControlRequest) async -> SteveControlResponse) throws {
+        self.path = path
+        let parent = URL(fileURLWithPath: path).deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let attributes = try FileManager.default.attributesOfItem(atPath: parent.path)
+        guard attributes[.type] as? FileAttributeType == .typeDirectory,
+              (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
+              (attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700 else {
+            throw RPCError(message: "Local control directory must be owned by this user with permissions 0700.")
+        }
+        ownership = open(parent.appendingPathComponent("lock").path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard ownership >= 0 else { throw RPCError(message: "Could not lock local control endpoint.") }
+        guard flock(ownership, LOCK_EX | LOCK_NB) == 0 else { close(ownership); throw RPCError(message: "Steve is already running for this user.") }
+        listener = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard listener >= 0 else { close(ownership); throw RPCError(message: "Could not create local control endpoint.") }
+        do {
+            var address = try SteveControlSocket.address(path)
+            unlink(path)
+            let bound = withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(listener, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+            }
+            guard bound == 0, chmod(path, 0o600) == 0, listen(listener, 8) == 0 else { throw RPCError(message: "Could not listen on local control endpoint.") }
+        } catch { close(listener); close(ownership); throw error }
+        let fd = listener
+        DispatchQueue(label: "steve.local-control").async {
+            while true {
+                let client = accept(fd, nil, nil)
+                guard client >= 0 else { if errno == EINTR { continue }; return }
+                SteveControlSocket.configure(client)
+                var uid: uid_t = 0, gid: gid_t = 0
+                guard getpeereid(client, &uid, &gid) == 0, uid == getuid() else { close(client); continue }
+                // Serialize reads with a deadline, then let actor isolation handle
+                // execution. No shell commands or arbitrary paths are dispatched.
+                do {
+                    let request = try JSONDecoder().decode(SteveControlRequest.self, from: SteveControlSocket.read(client))
+                    Task {
+                        defer { close(client) }
+                        let response = await handler(request)
+                        if let data = try? JSONEncoder().encode(response) { try? SteveControlSocket.write(data, fd: client) }
+                    }
+                } catch { close(client) }
+            }
+        }
+    }
+
+    deinit { shutdown(listener, SHUT_RDWR); close(listener); unlink(path); close(ownership) }
+}
