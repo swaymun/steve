@@ -72,15 +72,16 @@ Taking control pauses and drains the worker. Disconnect, expiry, revocation, and
 
 ## Video evidence
 
-For an explicitly requested task demonstration, the native recorder creates H.264 MP4 video with optional AAC system audio. It decodes the output locally and checks size and duration before returning a workspace artifact. The relay can select that artifact for native iMessage delivery. Video is evidence of what happened; it does not replace checking the task’s actual result.
+For an explicitly requested task demonstration, the native recorder creates H.264 MP4 video. Exact-window capture is the default: inventory the named app's visible windows, choose the verified task window, and record only that window. Steve decodes the output locally and checks size and duration before returning a workspace artifact. The relay can select that artifact for native iMessage delivery. Video is evidence of what happened; it does not replace checking the task’s actual result.
 
 ```sh
-steve video start --demonstration --display DISPLAY_ID --seconds 30 --json
+steve video windows --app BUNDLE_ID --json
+steve video start --demonstration --window WINDOW_ID --app BUNDLE_ID --seconds 30 --json
 steve video stop RECORDING_ID --json
 steve video cancel --json
 ```
 
-Choose the display containing the verified task window. Add `--audio` when the demonstration requires system sound. Microphone recording is not supported. Finish permissions and authentication before recording; cancel before any login, sensitive input, or phone takeover. The visible recording indicator also offers cancellation.
+Window capture excludes the desktop and other windows, does not include child windows or audio, and cancels if the selected window is resized, hidden, closed, or replaced. Do not guess a window ID or fall back to a wider scope when the requested window is unavailable. Full-display capture requires separate, explicit authorization for everything visible on that display: `steve video start --demonstration --display DISPLAY_ID --seconds 30 --json`. Add `--audio` only when system sound was also explicitly authorized; it is available only with display capture. Microphone recording is not supported. Finish permissions and authentication before recording; cancel before any login, sensitive input, or phone takeover. The visible recording indicator also offers cancellation.
 
 The default delivery budget is 24 MiB, with a maximum recording duration of 120 seconds. These are Steve’s limits, not an Apple-published iMessage attachment limit. Exceeding a limit discards the unfinished clip. Short demonstrations with and without system audio have been received and fully decoded on another Mac; Messages converted the H.264 MP4 to a HEVC MOV and retained the AAC audio. Do not assume the received file has the source codec, extension, or bytes. Actual iPhone playback remains a separate acceptance check. Apple documents inline video attachments in [Messages on Mac](https://support.apple.com/guide/messages/send-images-ichtb967d30b/mac).
 

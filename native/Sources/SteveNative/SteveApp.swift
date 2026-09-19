@@ -178,6 +178,12 @@ final class SteveModel: ObservableObject {
         guard let pendingApproval else { return }
         run { try await $0.resolveApproval(id: pendingApproval.id, decision: decision) }
     }
+    func openConnectionSetup() {
+        guard let pendingApproval, pendingApproval.requiresConnectionSetup else { return }
+        run { runtime in
+            try await runtime.openConnectionSetup(id: pendingApproval.id) { NSWorkspace.shared.open($0) }
+        }
+    }
     var configured: Bool { snapshot?.status.connected == true && snapshot?.settings.workspaceRoot != nil && snapshot?.settings.permissionProfile != nil }
     var codexUnavailable: Bool { snapshot?.dependencies.first(where: { $0.name == "codex" })?.available == false }
     var canPhone: Bool { configured }
@@ -280,12 +286,17 @@ struct StevePopover: View {
             }
             if let approval = model.pendingApproval {
                 Divider()
-                Text("Approval requested").font(.headline).padding(.top, 8)
+                Text(approval.requiresConnectionSetup ? "Connection setup required" : "Approval requested").font(.headline).padding(.top, 8)
                 if let host = approval.originHost { Text(host).font(.caption).foregroundStyle(.secondary) }
                 Text(approval.message).font(.caption).textSelection(.enabled).padding(.vertical, 5)
                 HStack {
-                    Button("Allow once") { model.resolveApproval(.accept) }
-                    Button("Decline") { model.resolveApproval(.decline) }
+                    if approval.requiresConnectionSetup {
+                        Button("Open reconnection") { model.openConnectionSetup() }
+                        Button("Dismiss") { model.resolveApproval(.cancel) }
+                    } else {
+                        Button("Allow once") { model.resolveApproval(.accept) }
+                        Button("Decline") { model.resolveApproval(.decline) }
+                    }
                 }.padding(.bottom, 8)
             }
             DisclosureGroup("Advanced", isExpanded: $advancedExpanded) { action("Full Disk Access", action: model.openFullDiskAccessSettings); action("Diagnostics", action: model.openDiagnostics) }

@@ -3,7 +3,7 @@ import Foundation
 /// Synchronous gate for native capture/input callbacks. Gateway invalidation
 /// closes it before any suspension point, including pause, revoke, and takeover.
 final class SteveCapturePermit: @unchecked Sendable {
-    enum Kind { case phone, video }
+    enum Kind { case phone, video, connectionHandoff }
     private let lock = NSLock()
     private var active: (String, Kind)?
 

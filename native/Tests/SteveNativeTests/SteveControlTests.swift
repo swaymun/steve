@@ -2,6 +2,16 @@ import XCTest
 @testable import SteveNative
 
 final class SteveControlTests: XCTestCase {
+    func testVideoWindowCLIRequiresGroundedScopedSelection() throws {
+        let (inventory, json, _) = try SteveCLI.parse(["video", "windows", "--app", "com.apple.TextEdit", "--json"])
+        XCTAssertEqual(inventory.options, ["action": "windows", "app": "com.apple.TextEdit"]); XCTAssertTrue(json)
+        let (start, _, _) = try SteveCLI.parse(["video", "start", "--demonstration", "--window", "42", "--app", "com.apple.TextEdit", "--json"])
+        XCTAssertEqual(try TaskVideoTarget.parse(start.options), .window(42, app: "com.apple.TextEdit"))
+        XCTAssertThrowsError(try SteveCLI.parse(["video", "windows", "--display", "1"]))
+        XCTAssertThrowsError(try SteveCLI.parse(["video", "start", "--window", "42", "--window", "43", "--app", "com.apple.TextEdit"]))
+        XCTAssertThrowsError(try SteveCLI.parse(["video", "start", "--app", "com.apple.TextEdit", "--app", "com.other.App"]))
+    }
+
     func testNonInteractiveSetupHasNoImplicitMutations() throws {
         let (request, json, interactive) = try SteveCLI.parse(["setup", "--non-interactive", "--json"])
         XCTAssertEqual(request.command, "setup")

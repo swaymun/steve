@@ -53,6 +53,13 @@ private actor FixtureCodex: GatewayCodexClient {
     var stops = 0
     var holdWorker = false
     var approvalMode: String?
+    var activeApprovalBinding: (String, String)?
+    func requestConcurrentOrdinaryApproval() async -> CodexApprovalDecision? {
+        guard let (threadID, turnID) = activeApprovalBinding, let approvalHandler else { return nil }
+        return await approvalHandler(.init(requestID: "concurrent-native", method: "mcpServer/elicitation/request", threadID: threadID, turnID: turnID, message: "Allow app", origin: nil, connector: nil, tool: nil, expiresAt: Date().addingTimeInterval(10), mode: "form", nativeAppName: "TextEdit"))
+    }
+    var connectionSetup: CodexConnectionSetup?
+    func askConnectionSetup() { approvalMode = "url"; connectionSetup = .init(connectorName: "Google Calendar", url: URL(string: "https://chatgpt.com/plugins?token=secret")!) }
     var nativeAppName: String?
     func askNativeApproval(name: String = "TextEdit", mismatch: Bool = false) { approvalMode = "form"; nativeAppName = name; mismatchApproval = mismatch }
     var emptyBrowserForm = false
@@ -80,7 +87,8 @@ private actor FixtureCodex: GatewayCodexClient {
         let turnID = UUID().uuidString
         await onTurnStarted(turnID)
         if let mode = approvalMode, turns == 2, let approvalHandler {
-            let request = CodexApprovalRequest(requestID: "rpc-approval", method: "mcpServer/elicitation/request", threadID: mismatchApproval ? "other-thread" : threadID, turnID: turnID, message: "Allow fixture action? https://example.test/auth?token=secret", origin: approvalOrigin, connector: "fixture", tool: "read_record", expiresAt: Date().addingTimeInterval(approvalDuration), mode: mode, isEmptyBrowserOriginForm: emptyBrowserForm, nativeAppName: nativeAppName)
+            activeApprovalBinding = (threadID, turnID)
+            let request = CodexApprovalRequest(requestID: "rpc-approval", method: "mcpServer/elicitation/request", threadID: mismatchApproval ? "other-thread" : threadID, turnID: turnID, message: "Allow fixture action? https://example.test/auth?token=secret", origin: approvalOrigin, connector: "fixture", tool: "read_record", expiresAt: Date().addingTimeInterval(approvalDuration), mode: mode, isEmptyBrowserOriginForm: emptyBrowserForm, nativeAppName: nativeAppName, connectionSetup: connectionSetup)
             approvalDecision = await approvalHandler(request)
         }
         if holdWorker && turns == 2 { try await Task.sleep(for: .seconds(60)) }
@@ -350,12 +358,102 @@ final class GatewayLifecycleTests: XCTestCase {
         let pending = try await store.pendingOutbox(), state = try await store.queueState(first.id)
         XCTAssertTrue(pending.isEmpty); XCTAssertEqual(state, "uncertain")
     }
+    func testFlattenedControlGetsOneCorrectionWithOriginalProvenance() async throws {
+        let quote = "Remember concise answers"
+        let flat = #"{"schemaVersion":1,"kind":"relay_request","action":"control","operation":"preference_set","userQuote":"Remember concise answers","key":"style","value":"Concise"}"#
+        let fixed = #"{"schemaVersion":1,"kind":"relay_request","action":"control","control":{"operation":"preference_set","userQuote":"Remember concise answers","key":"style","value":"Concise"}}"#
+        let (store, gateway, _, codex) = try await setup([flat, fixed], withAutomation: true)
+        await gateway.start(); await gateway.receive(inbound("repair", text: quote))
+        try await eventually { try await store.agentSession(for: "chat")?.executionState == "idle" }
+        let automation = try SteveUserAutomationStore(databaseURL: store.databaseURL)
+        let preference = try await automation.preference(key: "style")
+        XCTAssertEqual(preference?.provenance.sourceID, "repair")
+        XCTAssertEqual(preference?.value, "Concise")
+        let inputs = await codex.inputs
+        XCTAssertEqual(inputs.count, 2)
+        XCTAssertTrue(inputs[1].hasPrefix("USER_REQUEST_FORMAT_CORRECTION:"))
+        XCTAssertTrue(inputs[1].contains("USER_REQUEST:\n" + quote))
+    }
+    func testSuccessfulScheduleControlDeliversCreatedIdentifierAndSettlesSession() async throws {
+        let quote = "Remind me every Friday at 4 pm America/Chicago to review tasks and tell me its identifier"
+        let envelope: [String: Any] = ["schemaVersion": 1, "kind": "relay_request", "action": "control",
+            "control": ["operation": "schedule_create", "userQuote": quote,
+                "schedule": ["name": "Friday review", "prompt": "Review tasks", "kind": "reminder", "timing": "calendar", "timeZone": "America/Chicago", "hour": 16, "minute": 0, "weekdays": [5]]]]
+        let reply = String(decoding: try JSONSerialization.data(withJSONObject: envelope), as: UTF8.self)
+        let (store, gateway, messages, codex) = try await setup([reply], withAutomation: true)
+        await gateway.start(); await gateway.receive(inbound("schedule-identifier", text: quote))
+        try await eventually { try await store.queueState("inbound:schedule-identifier") == "completed" }
+        try await eventually { try await store.agentSession(for: "chat")?.executionState == "idle" }
+        let automation = try SteveUserAutomationStore(databaseURL: store.databaseURL)
+        let schedules = try await automation.schedules()
+        XCTAssertEqual(schedules.count, 1)
+        let schedule = try XCTUnwrap(schedules.first)
+        let sent = await messages.sent, turns = await codex.turns
+        XCTAssertTrue(sent.joined().contains("Identifier: " + schedule.id))
+        let session = try await store.agentSession(for: "chat")
+        XCTAssertEqual(session?.lastMessageGuid, "schedule-identifier")
+        XCTAssertEqual(turns, 1, "Successful control must not run a worker or retry")
+    }
+    func testFridayScheduleCorrectionPersistsOnceEvenWhenDeliveryIsUncertain() async throws {
+        let quote = "Remind me every Friday at 4 pm America/Chicago to review tasks"
+        let control: [String: Any] = ["operation": "schedule_create", "userQuote": quote,
+            "schedule": ["name": "Friday review", "prompt": "Review tasks", "kind": "reminder", "timing": "calendar", "timeZone": "America/Chicago", "hour": 16, "minute": 0, "weekdays": [5]]]
+        var flat = control
+        flat.merge(["schemaVersion": 1, "kind": "relay_request", "action": "control"]) { _, new in new }
+        let fixed: [String: Any] = ["schemaVersion": 1, "kind": "relay_request", "action": "control", "control": control]
+        let replies = try [flat, fixed].map { String(decoding: try JSONSerialization.data(withJSONObject: $0), as: UTF8.self) }
+        let (store, gateway, messages, codex) = try await setup(replies, withAutomation: true)
+        await messages.configure(failSend: true)
+        await gateway.start(); await gateway.receive(inbound("friday", text: quote))
+        try await eventually { try await store.queueState("inbound:friday") == "uncertain" }
+        let automation = try SteveUserAutomationStore(databaseURL: store.databaseURL)
+        let schedules = try await automation.schedules(), turns = await codex.turns
+        XCTAssertEqual(schedules.count, 1)
+        XCTAssertEqual(schedules.first?.rule, .calendar(hour: 16, minute: 0, weekdays: [5]))
+        XCTAssertEqual(schedules.first?.timeZone, "America/Chicago")
+        XCTAssertEqual(turns, 2)
+        await gateway.stop(); await gateway.start()
+        await gateway.receive(inbound("friday", text: quote))
+        let afterRestart = try await automation.schedules(), turnsAfterRestart = await codex.turns
+        XCTAssertEqual(afterRestart.count, 1); XCTAssertEqual(turnsAfterRestart, 2)
+    }
+    func testCorrectionFailureStopsAfterTwoTurnsAndMarksSessionFailed() async throws {
+        let (store, gateway, messages, codex) = try await setup(["broken", "still broken"])
+        await gateway.start(); await gateway.receive(inbound("repair-failed"))
+        try await eventually { await messages.sent.contains { $0.contains("couldn't safely prepare") } }
+        let state = try await store.agentSession(for: "chat")?.executionState
+        let inbox = try await store.queueState("inbound:repair-failed")
+        let turns = await codex.turns
+        XCTAssertEqual(state, "failed"); XCTAssertEqual(inbox, "failed"); XCTAssertEqual(turns, 2)
+        let sent = await messages.sent
+        XCTAssertFalse(sent.joined().contains("AgentEnvelopeError"))
+    }
+    func testCorrectionCanRefuseWithoutExecutingWorker() async throws {
+        let refusal = #"{"schemaVersion":1,"kind":"relay_request","action":"refuse","userMessage":"I cannot safely represent that request."}"#
+        let (store, gateway, messages, codex) = try await setup(["broken", refusal])
+        await gateway.start(); await gateway.receive(inbound("repair-refused"))
+        try await eventually { try await store.queueState("inbound:repair-refused") == "completed" }
+        let sent = await messages.sent, turns = await codex.turns
+        let state = try await store.agentSession(for: "chat")?.executionState
+        XCTAssertEqual(sent, ["I cannot safely represent that request."]); XCTAssertEqual(turns, 2); XCTAssertEqual(state, "idle")
+    }
+    func testCorrectedControlCannotInventCurrentUserProvenance() async throws {
+        let fixed = #"{"schemaVersion":1,"kind":"relay_request","action":"control","control":{"operation":"preference_set","userQuote":"Remember concise answers","key":"style","value":"Concise"}}"#
+        let (store, gateway, _, codex) = try await setup(["broken", fixed], withAutomation: true)
+        await gateway.start(); await gateway.receive(inbound("invented-quote", text: "List my preferences"))
+        try await eventually { try await store.agentSession(for: "chat")?.executionState == "failed" }
+        let automation = try SteveUserAutomationStore(databaseURL: store.databaseURL)
+        let preferences = try await automation.preferences(), turns = await codex.turns
+        XCTAssertTrue(preferences.isEmpty); XCTAssertEqual(turns, 2)
+    }
     func testMalformedWorkerResultIsNotExecutedAgain() async throws {
         let (store, gateway, messages, codex) = try await setup([relay, "broken output"])
         await gateway.start(); await gateway.receive(inbound("bad"))
         try await eventually { try await store.queueState("inbound:bad") == "uncertain" }
         let turns = await codex.turns, sent = await messages.sent
         XCTAssertEqual(turns, 2); XCTAssertFalse(sent.contains("Success"))
+        let session = try await store.agentSession(for: "chat")
+        XCTAssertEqual(session?.executionState, "uncertain")
     }
     func testUnknownAttachmentRejectsWholeDeliveryBeforeText() async throws {
         let plan = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Success"],"attachments":[{"artifactID":"missing"}]}"#
@@ -466,6 +564,120 @@ final class GatewayLifecycleTests: XCTestCase {
         let sent = await messages.sent, turns = await codex.turns
         XCTAssertTrue(sent[0].contains("working")); XCTAssertEqual(turns, 2)
     }
+    func testConnectionSetupRejectsApprovalAndKeepsURLLocalUntilExplicitHandoff() async throws {
+        let (store, gateway, messages, codex) = try await setup([relay, worker])
+        await codex.askConnectionSetup(); await codex.hold(); await gateway.start(); await gateway.receive(inbound("connect"))
+        try await eventually { await gateway.pendingApproval()?.promptDelivered == true }
+        let pending = await gateway.pendingApproval()!
+        XCTAssertTrue(pending.requiresConnectionSetup)
+        let encoded = String(decoding: try JSONEncoder().encode(pending), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("token=secret")); XCTAssertFalse(encoded.contains("https://"))
+        let sent = await messages.sent.joined()
+        XCTAssertTrue(sent.contains("Connection setup required")); XCTAssertFalse(sent.contains("reconnected ")); XCTAssertFalse(sent.contains("dismiss ")); XCTAssertFalse(sent.contains("Reply approve")); XCTAssertFalse(sent.contains("token=secret"))
+        await gateway.receive(inbound("yes-connect", text: "yes"))
+        await gateway.receive(inbound("approve-connect", text: "approve " + pending.id))
+        let decision = await codex.approvalDecision; XCTAssertNil(decision)
+        do { try await gateway.resolveApproval(id: pending.id, decision: .accept); XCTFail("Accepted OAuth as permission") } catch {}
+        try await gateway.openConnectionSetup(id: pending.id) { url in
+            XCTAssertEqual(url.host, "chatgpt.com")
+            return true
+        }
+        let active = await codex.activeTurns, isPaused = try await store.paused()
+        XCTAssertEqual(active, 0); XCTAssertTrue(isPaused)
+        try await eventually { await codex.approvalDecision == .cancel }
+        do { try await gateway.openConnectionSetup(id: pending.id) { _ in XCTFail("Stale opener invoked"); return false }; XCTFail("Reused old URL") } catch {}
+        await gateway.stop()
+    }
+    func testConnectionSetupPhoneTakeoverAndExistingPauseCancelWithoutVerification() async throws {
+        let (_, gateway, _, codex) = try await setup([relay, worker])
+        await codex.askConnectionSetup(); await gateway.start(); await gateway.receive(inbound("connect-phone"))
+        try await eventually { await gateway.pendingApproval()?.promptDelivered == true }
+        let id = await gateway.pendingApproval()!.id
+        _ = try await gateway.beginPhoneTakeover()
+        let decision = await codex.approvalDecision; XCTAssertEqual(decision, .cancel)
+        do { try await gateway.openConnectionSetup(id: id) { _ in XCTFail("Stale opener invoked"); return false }; XCTFail("URL survived takeover") } catch {}
+        await gateway.stop()
+        let (_, other, messages, otherCodex) = try await setup([relay, worker])
+        await otherCodex.askConnectionSetup(); await other.start(); await other.receive(inbound("manual-connect"))
+        try await eventually { await other.pendingApproval()?.promptDelivered == true }
+        let otherID = await other.pendingApproval()!.id
+        await other.receive(inbound("pause-connect", text: "/stop"))
+        try await eventually { await otherCodex.approvalDecision == .cancel }
+        try await eventually { await messages.sent.joined().contains("Steve is paused") }
+        do { try await other.openConnectionSetup(id: otherID) { _ in XCTFail("Stale opener invoked"); return false }; XCTFail("URL survived pause") } catch {}
+        await other.stop()
+    }
+
+    func testConnectionOpenerHoldsPauseUntilSynchronousOpenFinishes() async throws {
+        let (store, gateway, _, codex) = try await setup([relay, worker])
+        await codex.askConnectionSetup(); await gateway.start(); await gateway.receive(inbound("opening"))
+        try await eventually { await gateway.pendingApproval()?.promptDelivered == true }
+        let id = await gateway.pendingApproval()!.id
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let resumeStarted = DispatchSemaphore(value: 0), resumed = DispatchSemaphore(value: 0)
+        let opening = Task {
+            try await gateway.openConnectionSetup(id: id) { _ in
+                entered.signal()
+                XCTAssertEqual(release.wait(timeout: .now() + 3), .success)
+                return true
+            }
+        }
+        defer { release.signal() }
+        XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+        let resuming = Task {
+            resumeStarted.signal()
+            try await gateway.setPaused(false)
+            resumed.signal()
+        }
+        XCTAssertEqual(resumeStarted.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(resumed.wait(timeout: .now() + 0.05), .timedOut)
+        let paused = try await store.paused(); XCTAssertTrue(paused)
+        release.signal()
+        try await opening.value; try await resuming.value
+        let after = try await store.paused(); XCTAssertFalse(after)
+        await gateway.stop()
+    }
+    func testQueuedConnectionOpenerIsCancelledByResumeOrRevocation() async throws {
+        for revoke in [false, true] {
+            let (store, gateway, _, codex) = try await setup([relay, worker])
+            await codex.askConnectionSetup(); await gateway.start(); await gateway.receive(inbound("queued-opening"))
+            try await eventually { await gateway.pendingApproval()?.promptDelivered == true }
+            let id = await gateway.pendingApproval()!.id
+            let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+            let blocker = Task { @MainActor in
+                entered.signal()
+                XCTAssertEqual(release.wait(timeout: .now() + 3), .success)
+            }
+            defer { release.signal() }
+            XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+            let opening = Task {
+                try await gateway.openConnectionSetup(id: id) { _ in XCTFail("Invalidated opener ran"); return true }
+            }
+            try await eventually { (try? await store.paused()) == true }
+            if revoke { await gateway.beginBoundaryChange() }
+            else { try await gateway.setPaused(false) }
+            release.signal(); await blocker.value
+            do { try await opening.value; XCTFail("Invalidated handoff succeeded") } catch {}
+            await gateway.stop()
+        }
+    }
+
+    func testConnectionSetupDoesNotSwallowConcurrentOrdinaryApproval() async throws {
+        let (_, gateway, messages, codex) = try await setup([relay, worker])
+        await codex.askConnectionSetup(); await gateway.start(); await gateway.receive(inbound("concurrent-connect"))
+        try await eventually { await gateway.pendingApproval()?.promptDelivered == true }
+        let other = Task { await codex.requestConcurrentOrdinaryApproval() }
+        try await eventually { await messages.sent.contains(where: { $0.contains("Reply approve ") }) }
+        let prompt = await messages.sent.first(where: { $0.contains("Reply approve ") })!
+        let id = prompt.components(separatedBy: "Reply approve ")[1].components(separatedBy: " ")[0]
+        await gateway.receive(inbound("concurrent-accept", text: "approve " + id))
+        let decision = await other.value
+        XCTAssertEqual(decision, .accept)
+        let setupDecision = await codex.approvalDecision
+        XCTAssertNil(setupDecision)
+        await gateway.stop()
+    }
+
     func testBoundApprovalPromptDeliversAndPairedYesResolvesOnce() async throws {
         let (_, gateway, messages, codex) = try await setup([relay, worker])
         await codex.askApproval(); await gateway.start(); await gateway.receive(inbound("approval-task"))

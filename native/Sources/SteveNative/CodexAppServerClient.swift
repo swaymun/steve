@@ -481,6 +481,37 @@ struct CodexTurnResult: Sendable, Equatable {
         }
     }
 
+/// Auth URLs remain ephemeral inside the privileged request; never encode this
+/// into status, chat, worker context, or persistent storage.
+struct CodexConnectionSetup: Sendable, Equatable {
+    let connectorName: String
+    let url: URL
+
+    static func parse(_ params: [String: Any]) -> Self? {
+        guard params["mode"] as? String == "url", params["serverName"] as? String == "codex_apps",
+              let meta = params["_meta"] as? [String: Any],
+              let apps = meta["_codex_apps"] as? [String: Any],
+              let failure = apps["connector_auth_failure"] as? [String: Any],
+              let flag = failure["is_auth_failure"] as? NSNumber,
+              CFGetTypeID(flag) == CFBooleanGetTypeID(), flag.boolValue,
+              let id = failure["connector_id"] as? String, !id.isEmpty,
+              let name = failure["connector_name"] as? String, !name.isEmpty, name.utf8.count <= 100,
+              name == name.trimmingCharacters(in: .whitespacesAndNewlines),
+              !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              name.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.union(.whitespaces).union(CharacterSet(charactersIn: "-()&")).contains($0) }),
+              trustedURL(params["url"]) != nil,
+              let url = trustedURL(failure["install_url"]) else { return nil }
+        return Self(connectorName: name, url: url)
+    }
+    private static func trustedURL(_ value: Any?) -> URL? {
+        guard let raw = value as? String, let parts = URLComponents(string: raw),
+              parts.scheme?.lowercased() == "https", let host = parts.host?.lowercased(),
+              host == "chatgpt.com" || host.hasSuffix(".chatgpt.com"),
+              parts.user == nil, parts.password == nil, parts.port == nil || parts.port == 443 else { return nil }
+        return parts.url
+    }
+}
+
 struct CodexApprovalRequest: Sendable, Equatable {
     let requestID: String
     let method: String
@@ -494,6 +525,7 @@ struct CodexApprovalRequest: Sendable, Equatable {
     var mode: String? = nil
     var isEmptyBrowserOriginForm = false
     var nativeAppName: String? = nil
+    var connectionSetup: CodexConnectionSetup? = nil
 
     /// Both installed-client contracts grant app access for this session only:
     /// modern typed mcp_tool_call metadata and the older native-message fallback.
@@ -949,6 +981,11 @@ final class CodexRPCConnection: @unchecked Sendable {
             return
         }
         let meta = params["_meta"] as? [String: Any] ?? params["meta"] as? [String: Any] ?? [:]
+        let connectionSetup = CodexConnectionSetup.parse(params)
+        if params["mode"] as? String == "url", params["serverName"] as? String == "codex_apps", connectionSetup == nil {
+            try? write(["jsonrpc": "2.0", "id": id, "result": ["action": "cancel"]])
+            return
+        }
         let key = String(describing: id)
         guard approvalTasks[key] == nil else { return }
         let request = CodexApprovalRequest(requestID: key, method: method,
@@ -960,7 +997,7 @@ final class CodexRPCConnection: @unchecked Sendable {
                 && meta["connector_id"] as? String == "browser-use"
                 && meta["tool_name"] as? String == "access_browser_origin"
                 && CodexApprovalRequest.isEmptyOriginSchema(params["requestedSchema"]),
-            nativeAppName: CodexApprovalRequest.validatedNativeAppName(in: params))
+            nativeAppName: CodexApprovalRequest.validatedNativeAppName(in: params), connectionSetup: connectionSetup)
         // Log only classification, never prompt, origin, form contents, or tokens.
         SteveLog.write("Codex approval observed url=\(request.mode == "url") emptyBrowserForm=\(request.isEmptyBrowserOriginForm) nativeAppForm=\(request.nativeAppName != nil) unknownForm=\(request.mode == "form" && !request.isEmptyBrowserOriginForm && request.nativeAppName == nil) threadBound=\(request.threadID != nil) turnBound=\(request.turnID != nil)")
         if request.mode == "form", request.nativeAppName == nil, !request.isEmptyBrowserOriginForm {
@@ -984,7 +1021,7 @@ final class CodexRPCConnection: @unchecked Sendable {
             // Unsupported data-entry forms cannot become grants even if a
             // generic embedding handler mistakenly returns accept.
             let unsupportedForm = request.mode == "form" && !request.isEmptyBrowserOriginForm && request.nativeAppName == nil
-            self?.finishApproval(id: id, key: key, decision: unsupportedForm && decision == .accept ? .cancel : decision,
+            self?.finishApproval(id: id, key: key, decision: (unsupportedForm || request.connectionSetup != nil) && decision == .accept ? .cancel : decision,
                                  generation: expected, nativeAppForm: request.nativeAppName != nil)
         }
         DispatchQueue.global().asyncAfter(deadline: .now() + approvalTimeout) { [weak self] in

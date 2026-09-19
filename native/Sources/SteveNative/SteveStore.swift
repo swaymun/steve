@@ -224,6 +224,12 @@ actor SteveStore {
         )
     }
 
+    func finishAgentSession(chatGuid: String, messageGuid: String, state: String, expectedEpoch: String) throws {
+        guard try gatewayEpoch() == expectedEpoch else { throw CancellationError() }
+        try connection.run("UPDATE agent_sessions SET execution_state = ?, updated_at = ? WHERE chat_guid = ? AND last_message_guid = ? AND execution_state = 'running'",
+                           state, Self.dateFormatter.string(from: Date()), chatGuid, messageGuid)
+    }
+
     func deleteAgentSession(for chatGuid: String) throws {
         try connection.run("DELETE FROM agent_sessions WHERE chat_guid = ?", chatGuid)
     }

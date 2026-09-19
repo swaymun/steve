@@ -6,6 +6,8 @@ enum SteveCLI {
       steve approval [--json]
       steve approve|deny APPROVAL_ID [--json]
       steve phone [--disconnect] [--json]
+      steve video windows --app BUNDLE_ID [--json]
+      steve video start --demonstration --window ID --app BUNDLE_ID [--seconds 30] [--max-mib 24] [--json]
       steve video start --demonstration --display ID [--audio] [--seconds 30] [--max-mib 24] [--json]
       steve video stop RECORDING_ID [--json]
       steve video cancel [--json]
@@ -29,7 +31,7 @@ enum SteveCLI {
         var json = false, interactive = true
         var index = 1
         if command == "video" {
-            guard arguments.count > 1, ["start", "stop", "cancel"].contains(arguments[1]) else { throw RPCError(message: "Choose video start, stop, or cancel.") }
+            guard arguments.count > 1, ["windows", "start", "stop", "cancel"].contains(arguments[1]) else { throw RPCError(message: "Choose video windows, start, stop, or cancel.") }
             request.options["action"] = arguments[1]
             index = 2
             if arguments[1] == "stop" {
@@ -51,8 +53,13 @@ enum SteveCLI {
             case "--demonstration", "--audio":
                 guard command == "video", request.options["action"] == "start" else { throw RPCError(message: "\(arg) is a video start option.") }
                 request.options[String(arg.dropFirst(2))] = "true"
-            case "--display", "--seconds", "--max-mib":
+            case "--app":
+                guard command == "video", ["windows", "start"].contains(request.options["action"] ?? ""), index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else { throw TaskVideoError.invalidOptions }
+                guard request.options["app"] == nil else { throw TaskVideoError.invalidOptions }
+                index += 1; request.options["app"] = arguments[index]
+            case "--window", "--display", "--seconds", "--max-mib":
                 guard command == "video", request.options["action"] == "start", index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else { throw RPCError(message: "\(arg) requires a value on video start.") }
+                guard request.options[String(arg.dropFirst(2))] == nil else { throw TaskVideoError.invalidOptions }
                 index += 1
                 request.options[String(arg.dropFirst(2))] = arguments[index]
             case "--disconnect":

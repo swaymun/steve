@@ -25,8 +25,19 @@ final class SteveTaskVideoControl {
         do {
             guard let action = request.options["action"] else { throw TaskVideoError.invalidOptions }
             switch action {
+            case "windows":
+                guard Set(request.options.keys) == ["action", "app"], let app = request.options["app"], TaskVideoTarget.validAppID(app), !starting, authorization == nil else { throw TaskVideoError.invalidOptions }
+                starting = true
+                defer { starting = false }
+                let captured = generation
+                let grant = try await authorize()
+                defer { capturePermit.revoke(grant.token) }
+                guard generation == captured, capturePermit.allows(grant.token, kind: .video) else { throw TaskVideoError.privacy }
+                let windows = try await recorder.windows(app: app)
+                guard generation == captured, capturePermit.allows(grant.token, kind: .video) else { throw TaskVideoError.privacy }
+                return SteveControlResponse(state: "ready", summary: "Choose the exact task window from this app. No recording has started.", values: ["windows": String(decoding: try JSONEncoder().encode(windows), as: UTF8.self)])
             case "start":
-                let allowed: Set<String> = ["action", "demonstration", "audio", "display", "seconds", "max-mib"]
+                let allowed: Set<String> = ["action", "demonstration", "audio", "display", "window", "app", "seconds", "max-mib"]
                 guard Set(request.options.keys).isSubset(of: allowed), request.options["demonstration"] == "true" else {
                     throw RPCError(message: "Recording requires --demonstration for an explicitly requested, non-sensitive task demonstration. Stop before any login or password entry.")
                 }
@@ -45,22 +56,20 @@ final class SteveTaskVideoControl {
                     guard let number = Int(budget), (1...96).contains(number) else { throw TaskVideoError.invalidOptions }
                     options.maximumBytes = number * 1024 * 1024
                 }
-                guard let raw = request.options["display"], let display = UInt32(raw), display != 0 else {
-                    throw RPCError(message: "Choose the task display explicitly with --display ID before recording.")
-                }
+                let target = try TaskVideoTarget.parse(request.options)
                 try options.validate()
                 let grant = try await authorize()
                 guard generation == captured else { capturePermit.revoke(grant.token); throw TaskVideoError.privacy }
                 authorization = grant
                 let permit = capturePermit
                 do {
-                    let id = try await recorder.start(workspace: grant.workspace, displayID: display, options: options,
+                    let id = try await recorder.start(workspace: grant.workspace, target: target, options: options,
                         privacyAllowsCapture: { permit.allows(grant.token, kind: .video) }, onEnd: { [weak self] id in
                             self?.clearAuthorization(token: grant.token, recordingID: id)
                         })
                     guard authorization?.token == grant.token else { throw TaskVideoError.privacy }
                     recordingID = id
-                    return SteveControlResponse(state: "ready", summary: "Recording the selected Mac display. Stop before login or sensitive content. The time limit discards an unfinished recording.", values: ["recordingID": id.uuidString, "displayID": String(display), "systemAudio": String(options.systemAudio), "maximumSeconds": String(options.maximumDuration)])
+                    return SteveControlResponse(state: "ready", summary: "Recording only the selected \(target.label). Stop before login or sensitive content. The time limit discards an unfinished recording.", values: ["recordingID": id.uuidString, "captureScope": target.label, "systemAudio": String(options.systemAudio), "maximumSeconds": String(options.maximumDuration)])
                 } catch {
                     clearAuthorization(token: grant.token)
                     throw error

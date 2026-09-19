@@ -119,7 +119,7 @@ enum UserControlExecutor {
             let definition = control.schedule!
             let created = try await store.createSchedule(requestID: source.guid + ":schedule", name: definition.name, prompt: definition.prompt, kind: definition.kind, rule: try definition.rule(now: now), timeZone: definition.timeZone, authorization: authorization, provenance: provenance, now: now, expectedEpoch: epoch)
             let next = created.nextRunAt.map { ISO8601DateFormatter().string(from: $0) } ?? "none"
-            return "Scheduled \(created.name) as a \(created.kind.rawValue). Next occurrence: \(next) (\(created.timeZone))."
+            return "Scheduled \(created.name) as a \(created.kind.rawValue). Identifier: \(created.id). Next occurrence: \(next) (\(created.timeZone))."
         case .schedulePause, .scheduleResume:
             try await store.setSchedulePaused(id: control.scheduleID!, paused: control.operation == .schedulePause, provenance: provenance, now: now, expectedEpoch: epoch)
             return control.operation == .schedulePause ? "Paused that schedule. An already running task is separate; /stop pauses Steve." : "Resumed that schedule. Missed occurrences will coalesce into at most one run."

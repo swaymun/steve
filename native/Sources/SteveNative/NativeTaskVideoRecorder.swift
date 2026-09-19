@@ -4,7 +4,8 @@ import ScreenCaptureKit
 
 @MainActor
 protocol TaskVideoRecording: AnyObject {
-    func start(workspace: URL, displayID: CGDirectDisplayID, options: TaskVideoOptions,
+    func windows(app: String) async throws -> [TaskVideoWindow]
+    func start(workspace: URL, target: TaskVideoTarget, options: TaskVideoOptions,
                privacyAllowsCapture: @escaping @Sendable () -> Bool,
                onEnd: @escaping @MainActor @Sendable (UUID) -> Void) async throws -> UUID
     func stop(id: UUID) async throws -> TaskVideoArtifact
@@ -22,8 +23,7 @@ final class NativeTaskVideoRecorder: NSObject, TaskVideoRecording {
         let sink: TaskVideoCaptureSink
         let writer: TaskVideoWriter
         let directory: URL
-        let displayID: CGDirectDisplayID
-        let displayBounds: CGRect
+        let targetIsValid: @Sendable () -> Bool
         let privacyAllowsCapture: @Sendable () -> Bool
         let started: ContinuousClock.Instant
         let maximumDuration: TimeInterval
@@ -57,7 +57,20 @@ final class NativeTaskVideoRecorder: NSObject, TaskVideoRecording {
         }
     }
 
-    func start(workspace: URL, displayID: CGDirectDisplayID, options: TaskVideoOptions = TaskVideoOptions(),
+    func windows(app: String) async throws -> [TaskVideoWindow] {
+        guard TaskVideoTarget.validAppID(app), sessionIsUsable(), CGPreflightScreenCaptureAccess() else { throw TaskVideoError.unavailable }
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        guard sessionIsUsable() else { throw TaskVideoError.privacy }
+        return content.windows.compactMap(Self.windowDescription).filter { $0.app == app }.sorted { $0.windowID < $1.windowID }
+    }
+    private static func windowDescription(_ window: SCWindow) -> TaskVideoWindow? {
+        guard window.isOnScreen, window.windowLayer == 0, let owner = window.owningApplication,
+              window.frame.width.isFinite, window.frame.height.isFinite, window.frame.width > 0, window.frame.height > 0 else { return nil }
+        return .init(windowID: window.windowID, processID: owner.processID, app: owner.bundleIdentifier,
+                     title: String((window.title ?? "").prefix(240)), width: Int(window.frame.width.rounded(.up)), height: Int(window.frame.height.rounded(.up)))
+    }
+
+    func start(workspace: URL, target: TaskVideoTarget, options: TaskVideoOptions = TaskVideoOptions(),
                privacyAllowsCapture: @escaping @Sendable () -> Bool,
                onEnd: @escaping @MainActor @Sendable (UUID) -> Void = { _ in }) async throws -> UUID {
         guard active == nil, !transition else { throw TaskVideoError.busy }
@@ -72,12 +85,36 @@ final class NativeTaskVideoRecorder: NSObject, TaskVideoRecording {
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
             try Task.checkCancellation()
-            guard generation == id, privacyAllowsCapture(), sessionIsUsable(),
-                  let display = content.displays.first(where: { $0.displayID == displayID }) else { throw TaskVideoError.privacy }
+            guard generation == id, privacyAllowsCapture(), sessionIsUsable() else { throw TaskVideoError.privacy }
+            let filter: SCContentFilter
+            let targetIsValid: @Sendable () -> Bool
+            let sourceWidth: Int, sourceHeight: Int
+            switch target {
+            case .display(let displayID):
+                guard let display = content.displays.first(where: { $0.displayID == displayID }) else { throw TaskVideoError.privacy }
+                filter = SCContentFilter(display: display, excludingWindows: [])
+                sourceWidth = display.width; sourceHeight = display.height
+                let bounds = CGDisplayBounds(displayID)
+                targetIsValid = { CGDisplayBounds(displayID) == bounds }
+            case .window(let windowID, let app):
+                guard !options.systemAudio else { throw TaskVideoError.invalidOptions }
+                let selected = try TaskVideoWindow.selected(id: windowID, app: app, from: content.windows.compactMap(Self.windowDescription))
+                guard let window = content.windows.first(where: { $0.windowID == selected.windowID }) else { throw TaskVideoError.privacy }
+                // SDK contract: captures just this independent window, without
+                // the desktop, dock, other apps, or an encompassing display crop.
+                filter = SCContentFilter(desktopIndependentWindow: window)
+                sourceWidth = Int((filter.contentRect.width * CGFloat(filter.pointPixelScale)).rounded(.up))
+                sourceHeight = Int((filter.contentRect.height * CGFloat(filter.pointPixelScale)).rounded(.up))
+                targetIsValid = {
+                    guard let list = CGWindowListCopyWindowInfo(.optionIncludingWindow, selected.windowID) as? [[String: Any]], list.count == 1, let info = list.first else { return false }
+                    return selected.stillMatches(info)
+                }
+            }
+            guard targetIsValid(), sourceWidth > 0, sourceHeight > 0 else { throw TaskVideoError.privacy }
             let directory = try Self.makeDirectory(workspace: workspace, id: id)
             preparedDirectory = directory
-            let (width, height) = options.dimensions(width: display.width, height: display.height)
-            let sink = TaskVideoCaptureSink(allowsCapture: privacyAllowsCapture)
+            let (width, height) = options.dimensions(width: sourceWidth, height: sourceHeight)
+            let sink = TaskVideoCaptureSink(allowsCapture: { privacyAllowsCapture() && targetIsValid() })
             let writer = try TaskVideoWriter(url: directory.appendingPathComponent("capture.partial.mp4"), width: width, height: height, options: options, allowsCapture: { [weak sink] in sink?.mayCapture() == true })
             sink.writer = writer
             preparedWriter = writer
@@ -86,18 +123,21 @@ final class NativeTaskVideoRecorder: NSObject, TaskVideoRecording {
             configuration.height = height
             configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(options.framesPerSecond))
             configuration.queueDepth = 5
-            configuration.showsCursor = true
+            configuration.showsCursor = target.label == "display"
+            configuration.ignoreShadowsSingleWindow = true
+            configuration.ignoreGlobalClipSingleWindow = true
+            if #available(macOS 14.2, *) { configuration.includeChildWindows = false }
             configuration.pixelFormat = kCVPixelFormatType_32BGRA
             configuration.capturesAudio = options.systemAudio
             configuration.sampleRate = 48_000
             configuration.channelCount = 2
             configuration.excludesCurrentProcessAudio = true
             // There is deliberately no microphone capture option or input.
-            let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: configuration, delegate: sink)
+            let stream = SCStream(filter: filter, configuration: configuration, delegate: sink)
             preparedStream = stream
             try stream.addStreamOutput(sink, type: .screen, sampleHandlerQueue: sink.queue)
             if options.systemAudio { try stream.addStreamOutput(sink, type: .audio, sampleHandlerQueue: sink.queue) }
-            active = Active(id: id, stream: stream, sink: sink, writer: writer, directory: directory, displayID: displayID, displayBounds: CGDisplayBounds(displayID), privacyAllowsCapture: privacyAllowsCapture, started: .now, maximumDuration: options.maximumDuration, onEnd: onEnd)
+            active = Active(id: id, stream: stream, sink: sink, writer: writer, directory: directory, targetIsValid: targetIsValid, privacyAllowsCapture: privacyAllowsCapture, started: .now, maximumDuration: options.maximumDuration, onEnd: onEnd)
             showBadge()
             try await stream.startCapture()
             try Task.checkCancellation()
@@ -109,7 +149,7 @@ final class NativeTaskVideoRecorder: NSObject, TaskVideoRecording {
                     do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
                     guard let self, let current = self.active, current.id == id else { return }
                     let reason: TaskVideoError?
-                    if !current.privacyAllowsCapture() || !self.sessionIsUsable() || CGDisplayBounds(current.displayID) != current.displayBounds { reason = .privacy }
+                    if !current.privacyAllowsCapture() || !self.sessionIsUsable() || !current.targetIsValid() { reason = .privacy }
                     else if current.started.duration(to: .now) >= .seconds(current.maximumDuration) { reason = .durationLimit }
                     else { reason = current.writer.currentFailure() }
                     if let reason { await self.cancel(reason: reason); return }
@@ -141,10 +181,10 @@ final class NativeTaskVideoRecorder: NSObject, TaskVideoRecording {
             await current.sink.drain()
             let end = CMClockGetTime(CMClockGetHostTimeClock())
             try Task.checkCancellation()
-            guard generation == id, current.privacyAllowsCapture(), sessionIsUsable() else { throw TaskVideoError.privacy }
+            guard generation == id, current.privacyAllowsCapture(), current.targetIsValid(), sessionIsUsable() else { throw TaskVideoError.privacy }
             let artifact = try await Task.detached { try await current.writer.finish(at: end) }.value
             try Task.checkCancellation()
-            guard generation == id, current.privacyAllowsCapture(), sessionIsUsable() else { throw TaskVideoError.privacy }
+            guard generation == id, current.privacyAllowsCapture(), current.targetIsValid(), sessionIsUsable() else { throw TaskVideoError.privacy }
             let destination = current.directory.appendingPathComponent("demo-\(id.uuidString.lowercased()).mp4")
             try FileManager.default.moveItem(at: artifact.url, to: destination)
             active = nil; transition = false; hideBadge()

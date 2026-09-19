@@ -3,6 +3,35 @@ import XCTest
 @testable import SteveNative
 
 final class CodexRPCConnectionTests: XCTestCase {
+    func testConnectionSetupRequiresOfficialTypedMetadataAndTrustedURLs() throws {
+        var params: [String: Any] = ["mode": "url", "serverName": "codex_apps", "url": "https://chatgpt.com/auth?token=secret", "_meta": ["_codex_apps": ["connector_auth_failure": ["is_auth_failure": true, "connector_id": "calendar", "connector_name": "Google Calendar", "install_url": "https://chatgpt.com/plugins?token=secret"]]]]
+        XCTAssertEqual(CodexConnectionSetup.parse(params)?.connectorName, "Google Calendar")
+        let validRPC = try nativeApprovalEchoConnection(params: params)
+        defer { validRPC.stop() }
+        validRPC.setApprovalHandler { request in
+            XCTAssertEqual(request.connectionSetup?.connectorName, "Google Calendar")
+            return .accept // A generic handler cannot assert OAuth completion.
+        }
+        let validEcho = try XCTUnwrap(try validRPC.request(method: "fixture") as? [String: Any])
+        let validResult = try XCTUnwrap(validEcho["result"] as? [String: Any])
+        XCTAssertEqual(String(decoding: try JSONSerialization.data(withJSONObject: validResult, options: [.sortedKeys]), as: UTF8.self), #"{"action":"cancel"}"#)
+
+        for url in ["http://chatgpt.com/auth", "https://chatgpt.com.evil.test/auth", "https://user:pass@chatgpt.com/auth", "https://chatgpt.com:444/auth"] {
+            var invalid = params; invalid["url"] = url
+            XCTAssertNil(CodexConnectionSetup.parse(invalid))
+        }
+        params["_meta"] = ["_codex_apps": ["connector_auth_failure": ["is_auth_failure": 1, "connector_id": "calendar", "connector_name": "Google Calendar", "install_url": "https://chatgpt.com/plugins"]]]
+        XCTAssertNil(CodexConnectionSetup.parse(params))
+        params["_meta"] = ["_codex_apps": ["connector_auth_failure": ["is_auth_failure": true, "connector_id": "calendar", "connector_name": "Calendar https://secret.invalid", "install_url": "https://chatgpt.com/plugins"]]]
+        XCTAssertNil(CodexConnectionSetup.parse(params))
+        let rpc = try nativeApprovalEchoConnection(params: params)
+        defer { rpc.stop() }
+        rpc.setApprovalHandler { _ in XCTFail("Malformed connector setup reached generic approval"); return .accept }
+        let echo = try XCTUnwrap(try rpc.request(method: "fixture") as? [String: Any])
+        let result = try XCTUnwrap(echo["result"] as? [String: Any])
+        XCTAssertEqual(result["action"] as? String, "cancel")
+    }
+
     func testBrowserOriginApprovalRequiresAnEmptyObjectSchema() {
         XCTAssertTrue(CodexApprovalRequest.isEmptyOriginSchema(["type": "object", "properties": [:], "additionalProperties": false]))
         XCTAssertTrue(CodexApprovalRequest.isEmptyOriginSchema(["type": "object", "properties": [:], "required": []]))

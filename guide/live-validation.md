@@ -17,8 +17,8 @@ For each scenario, record the installed build identity, start/end time, observed
 | Reminder | Schedule a short one-time reminder in an explicit timezone. | Exactly one received reminder, durable outcome, and no duplicate after restart. |
 | Recurring task | Schedule a harmless workspace task, miss several intervals, then restart. | One coalesced run, correct next occurrence, real task and delivery result; unresolved outcomes block further runs. |
 | Phone takeover | Open the private link in iPhone Safari, control an inert test form, disconnect, expire, and revoke. | Worker paused before capture/input; no recorded or model-visible typing; end states stay paused unless explicitly resumed. |
-| Task video | On an explicitly selected display, record a short non-sensitive TextEdit demonstration and send it. | Visible recording indicator, valid H.264 MP4, exact task outcome, received native attachment, actual iPhone playback. |
-| Video audio | Repeat with a brief known system sound and `--audio`. | Audible AAC track in the received clip; no microphone recording. |
+| Task video | Inventory TextEdit windows, select the exact harmless task window, record it without display fallback, and send it. | Only the selected window appears, visible recording indicator, valid H.264 MP4, exact task outcome, received native attachment; actual iPhone playback remains unverified. |
+| Video audio | With separate authorization for full-display and system-audio scope, repeat on an explicitly selected display with a brief known sound and `--audio`. | Audible AAC track in the received clip; no microphone recording; actual iPhone playback remains unverified. |
 | Video privacy | Cancel through the indicator and request phone takeover during a harmless recording. | No incomplete clip delivered; input/capture permit closed; discarded files absent. |
 | Link test request | Review a fictional purchase envelope and use only the supported test-mode adapter. | Exact test amount/items, stable operation identity, no real charge, no credential-bearing output in model/chat/logs. |
 

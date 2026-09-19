@@ -7,9 +7,12 @@ import XCTest
 private final class CaptureFakeRecorder: TaskVideoRecording {
     var callbacks: [(UUID, @MainActor @Sendable (UUID) -> Void)] = []
     var starts = 0
-    func start(workspace: URL, displayID: CGDirectDisplayID, options: TaskVideoOptions, privacyAllowsCapture: @escaping @Sendable () -> Bool, onEnd: @escaping @MainActor @Sendable (UUID) -> Void) async throws -> UUID {
+    var targets: [TaskVideoTarget] = []
+    func windows(app: String) async throws -> [TaskVideoWindow] { [] }
+    func start(workspace: URL, target: TaskVideoTarget, options: TaskVideoOptions, privacyAllowsCapture: @escaping @Sendable () -> Bool, onEnd: @escaping @MainActor @Sendable (UUID) -> Void) async throws -> UUID {
         guard privacyAllowsCapture() else { throw TaskVideoError.privacy }
         starts += 1
+        targets.append(target)
         let id = UUID()
         callbacks.append((id, onEnd))
         return id
@@ -20,6 +23,46 @@ private final class CaptureFakeRecorder: TaskVideoRecording {
 }
 
 final class CaptureBoundaryTests: XCTestCase {
+    func testWindowTargetRequiresExactScopeAndRejectsWideningOrAudio() throws {
+        XCTAssertEqual(try TaskVideoTarget.parse(["window": "42", "app": "com.apple.TextEdit"]), .window(42, app: "com.apple.TextEdit"))
+        XCTAssertEqual(try TaskVideoTarget.parse(["display": "1", "audio": "true"]), .display(1))
+        for invalid in [[String: String](), ["app": "com.apple.TextEdit"], ["window": "42"], ["window": "0", "app": "com.apple.TextEdit"], ["window": "42", "app": "TextEdit"], ["window": "42", "app": "com.apple.TextEdit", "display": "1"], ["window": "42", "app": "com.apple.TextEdit", "audio": "true"]] {
+            XCTAssertThrowsError(try TaskVideoTarget.parse(invalid))
+        }
+    }
+    func testWindowSelectionAndLifecycleFailClosedWithoutDisplayFallback() throws {
+        let selected = TaskVideoWindow(windowID: 42, processID: 123, app: "com.apple.TextEdit", title: "Task", width: 600, height: 400)
+        XCTAssertEqual(try TaskVideoWindow.selected(id: 42, app: selected.app, from: [selected]), selected)
+        for windows in [[], [selected, selected]] { XCTAssertThrowsError(try TaskVideoWindow.selected(id: 42, app: selected.app, from: windows)) }
+        XCTAssertThrowsError(try TaskVideoWindow.selected(id: 42, app: "com.other.App", from: [selected]))
+        var info: [String: Any] = [kCGWindowNumber as String: 42, kCGWindowOwnerPID as String: 123, kCGWindowIsOnscreen as String: true, kCGWindowBounds as String: CGRect(x: 20, y: 20, width: 600, height: 400).dictionaryRepresentation]
+        XCTAssertTrue(selected.stillMatches(info))
+        info[kCGWindowBounds as String] = CGRect(x: 900, y: 20, width: 600, height: 400).dictionaryRepresentation
+        XCTAssertTrue(selected.stillMatches(info)) // Moving doesn't change scope.
+        info[kCGWindowBounds as String] = CGRect(x: 900, y: 20, width: 900, height: 400).dictionaryRepresentation
+        XCTAssertFalse(selected.stillMatches(info))
+        info[kCGWindowBounds as String] = CGRect(x: 20, y: 20, width: 600, height: 400).dictionaryRepresentation
+        info[kCGWindowOwnerPID as String] = 456
+        XCTAssertFalse(selected.stillMatches(info))
+        info[kCGWindowOwnerPID as String] = 123
+        info[kCGWindowIsOnscreen as String] = false
+        XCTAssertFalse(selected.stillMatches(info))
+        XCTAssertFalse(selected.stillMatches([:]))
+    }
+    @MainActor func testWindowControlPassesOnlyExplicitTargetToRecorder() async throws {
+        let permit = SteveCapturePermit(), recorder = CaptureFakeRecorder()
+        let control = SteveTaskVideoControl(capturePermit: permit, authorize: {
+            let token = UUID().uuidString; try permit.issue(token, kind: .video)
+            return .init(token: token, workspace: URL(fileURLWithPath: "/fixture"))
+        }, recorder: recorder)
+        let result = await control.handle(.init(command: "video", options: ["action": "start", "demonstration": "true", "window": "42", "app": "com.apple.TextEdit"]))
+        XCTAssertEqual(result.state, "ready"); XCTAssertEqual(result.values["captureScope"], "window")
+        XCTAssertEqual(recorder.targets, [.window(42, app: "com.apple.TextEdit")])
+        await control.cancel()
+        let invalid = await control.handle(.init(command: "video", options: ["action": "start", "demonstration": "true", "window": "42", "app": "com.apple.TextEdit", "audio": "true"]))
+        XCTAssertEqual(invalid.state, "failed"); XCTAssertEqual(recorder.starts, 1)
+    }
+
     func testInvalidationWaitsForWholeInputPairAndBlocksFutureInput() throws {
         let permit = SteveCapturePermit()
         try permit.issue("fixture", kind: .phone)

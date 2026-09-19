@@ -23,6 +23,7 @@ struct PendingApprovalSnapshot: Codable, Sendable, Equatable {
     let tool: String?
     let expiresAt: Date
     var promptDelivered = false
+    var requiresConnectionSetup = false
 }
 
 struct PhoneAccessBoundary: Sendable, Equatable {
@@ -80,6 +81,7 @@ actor GatewayCoordinator {
     private var epoch = UUID().uuidString
     private var running = false
     private var changingBoundary = false
+    private var connectionHandoffToken: String?
     private struct WorkerBinding {
         let epoch: String
         let threadID: String
@@ -91,6 +93,7 @@ actor GatewayCoordinator {
         let binding: WorkerBinding
         let continuation: CheckedContinuation<CodexApprovalDecision, Never>
         let expiryTask: Task<Void, Never>
+        let connectionURL: URL?
     }
     private struct TakeoverGuard {
         let token: String
@@ -236,6 +239,7 @@ actor GatewayCoordinator {
     @discardableResult
     func invalidate(cancelQueued: Bool = true, takeoverReservation reservation: String? = nil) async -> String {
         capturePermit.invalidate()
+        connectionHandoffToken = nil
         let invalidatedEpoch = UUID().uuidString
         epoch = invalidatedEpoch
         let keepPaused = takeover != nil || takeoverReservation != nil || reservation != nil
@@ -266,6 +270,12 @@ actor GatewayCoordinator {
     func setPaused(_ value: Bool) async throws {
         guard value || (takeover == nil && takeoverReservation == nil) else {
             throw RPCError(message: "Finish phone control before resuming Steve.")
+        }
+        if !value, let token = connectionHandoffToken {
+            // Cancel an opening queued on MainActor, or wait for its synchronous
+            // open call to finish before the worker may resume.
+            capturePermit.revoke(token)
+            connectionHandoffToken = nil
         }
         paused = value
         if value { await invalidate(cancelQueued: false) }
@@ -392,6 +402,22 @@ actor GatewayCoordinator {
     }
     private func handleControl(_ message: SteveInboundMessage) async throws -> Bool {
         let command = message.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let fields = command.split(separator: " ")
+        let pendingForSender = approvals.values.filter {
+            $0.binding.message.chatGuid == message.chatGuid
+                && normalizeHandle($0.binding.message.senderHandle) == normalizeHandle(message.senderHandle)
+                && $0.snapshot.expiresAt > Date()
+        }
+        let connection = pendingForSender.first { pending in
+            guard pending.snapshot.requiresConnectionSetup else { return false }
+            if fields.count == 2, fields[0] == "approve" { return pending.snapshot.id.lowercased() == fields[1] }
+            return command == "yes" && pendingForSender.count == 1 && pending.snapshot.promptDelivered
+        }
+        if let connection {
+            _ = try await store.claimInbox([message.guid])
+            try await stage(messages: [connection.snapshot.message], attachments: [], inbound: [message], workspace: nil, permission: nil, epoch: epoch, control: true)
+            return true
+        }
         if (!["yes", "no"].contains(command) || message.approvalID != nil), let (id, decision) = phoneApproval(command, message: message) {
             _ = try await store.claimInbox([message.guid])
             try await resolveApproval(id: id, decision: decision)
@@ -489,7 +515,7 @@ actor GatewayCoordinator {
         let chatGuid = first.chatGuid
         let text = inbound.map(\.text).joined(separator: "\n")
         let attachmentPaths = inbound.flatMap(\.attachmentPaths)
-        var workerStarted = false
+        var actionsStarted = false
         var scheduledRun: UserScheduleRun?
         do {
             let trusted = try await store.trustedConversation()
@@ -601,25 +627,54 @@ actor GatewayCoordinator {
             let relayInput = "USER_REQUEST:\n\(text)\n\nCURRENT_TIME_UTC:\n\(ISO8601DateFormatter().string(from: clockNow()))\n\nCONFIGURED_TIMEZONE:\n\(settings.timezone)\n\nINBOUND_ATTACHMENT_PATHS:\n\(attachmentPaths.joined(separator: "\n"))\(savedContext)\n\nAVAILABLE_SCHEDULES_JSON:\n\(try encodeJSON(scheduleValues))\n\nUNRESOLVED_SCHEDULE_RUNS_JSON:\n\(try encodeJSON(runValues))\(scheduledContext)\(capabilityContext)"
             SteveLog.write("Gateway relay intent phase started chat=\(chatGuid)")
             let relayResult = try await runTurn(on: relayThreadID, input: relayInput, attachments: attachmentPaths)
-            let relayRequest = try AgentEnvelopeParser.relayRequest(from: relayResult.text)
+            let relayRequest: RelayRequestEnvelope
+            do {
+                relayRequest = try AgentEnvelopeParser.relayRequest(from: relayResult.text)
+            } catch {
+                // This is the only repair point: no control or worker action has
+                // run. Never reuse this path for execution/delivery failures.
+                try check(epoch)
+                let correction = """
+                USER_REQUEST_FORMAT_CORRECTION:
+                Your previous response did not validate as a relay_request. No control or worker action has run.
+                Return one corrected JSON envelope using the original request below, or clarify/refuse if you cannot represent it safely. This is the only correction attempt.
+                For action=control, operation, userQuote, and schedule belong INSIDE control, not at the top level:
+                {"schemaVersion":1,"kind":"relay_request","action":"control","workerPrompt":null,"userMessage":null,"workerContextAction":"reuse","control":{"operation":"schedule_list","userQuote":"exact words from the current request"}}
+                Preserve the original request's scope; copy userQuote only from its actual human text. Do not claim that any action occurred. All runtime validation still applies.
+
+                ORIGINAL_REQUEST_CONTEXT:
+                \(relayInput)
+                """
+                let repaired = try await runTurn(on: relayThreadID, input: correction, attachments: attachmentPaths)
+                relayRequest = try AgentEnvelopeParser.relayRequest(from: repaired.text)
+            }
+            try check(epoch)
             if relayRequest.action == .control {
                 guard scheduledRun == nil, let control = relayRequest.control else { throw UserAutomationError.invalid("Controls require a direct human request.") }
                 try check(epoch)
                 if control.operation == .phoneAccess {
+                    actionsStarted = true
+                    var controlState = "idle"
                     do { try await queuePrivatePhoneAccess(control, inbound: inbound, epoch: epoch) }
                     catch is CancellationError { throw CancellationError() }
                     catch {
+                        controlState = "failed"
                         // Callback errors can contain a URL. Keep details out of both
                         // the model and the durable/logged response.
                         try await stage(messages: ["I couldn't create phone access. Check phone setup in Steve on the Mac, then ask for a new link."], attachments: [], inbound: inbound, workspace: nil, permission: nil, epoch: epoch, control: true)
                     }
+                    try await store.finishAgentSession(chatGuid: chatGuid, messageGuid: first.guid, state: controlState, expectedEpoch: epoch)
                     return
                 }
                 guard let automation else { throw UserAutomationError.invalid("Saved preferences and schedules are unavailable.") }
+                actionsStarted = true
                 let response: String
+                var controlState = "idle"
                 do { response = try await UserControlExecutor.perform(control, inbound: inbound, store: automation, authorization: authorization, epoch: epoch, now: clockNow()) }
-                catch { response = "I couldn't make that change: " + error.localizedDescription }
+                catch is CancellationError { throw CancellationError() }
+                catch { controlState = "failed"; response = "I couldn't make that change: " + error.localizedDescription }
                 try await stage(messages: [response], attachments: [], inbound: inbound, workspace: workspace, permission: permission, epoch: epoch)
+                try await store.finishAgentSession(chatGuid: chatGuid, messageGuid: first.guid, state: controlState, expectedEpoch: epoch)
                 return
             }
             if relayRequest.action != .execute {
@@ -674,7 +729,7 @@ actor GatewayCoordinator {
 
             func runWorker(on threadID: String) async throws -> (envelope: WorkerResultEnvelope, artifacts: [WorkerArtifactEnvelope]) {
                 SteveLog.write("Gateway worker execution phase started chat=\(chatGuid) thread=\(threadID)")
-                workerStarted = true
+                actionsStarted = true
                 let result = try await runTurn(on: threadID, input: workerInput, attachments: attachmentPaths, isWorker: true)
                 let envelope = try AgentEnvelopeParser.workerResult(from: result.text)
                 return (envelope, try verifiedArtifacts(from: envelope, workspace: workspace))
@@ -713,11 +768,12 @@ actor GatewayCoordinator {
             // A failed envelope or lost completion may follow successful actions.
             // Record uncertainty; never rerun the original worker request.
             if self.epoch == epoch && !Task.isCancelled {
-                try? await store.finishInbox(inbound.map(\.guid), state: workerStarted ? "uncertain" : "failed")
+                try? await store.finishAgentSession(chatGuid: chatGuid, messageGuid: first.guid, state: actionsStarted ? "uncertain" : "failed", expectedEpoch: epoch)
+                try? await store.finishInbox(inbound.map(\.guid), state: actionsStarted ? "uncertain" : "failed")
                 SteveLog.write("Gateway execution needs review error=\(error.localizedDescription)")
-                let notice = workerStarted
+                let notice = actionsStarted
                     ? "I couldn't verify the final outcome. Some actions may have completed. I haven't retried the task."
-                    : "I couldn't start that task. \(error.localizedDescription)"
+                    : "I couldn't safely prepare that request. No task actions were started. Please try again or rephrase it."
                 do {
                     let settings = try await store.getSettings() ?? defaultSettings()
                     try check(epoch)
@@ -733,7 +789,7 @@ actor GatewayCoordinator {
     func pendingApproval() -> PendingApprovalSnapshot? {
         approvals.values.filter { $0.snapshot.expiresAt > Date() }.map(\.snapshot).sorted { $0.expiresAt < $1.expiresAt }.first
     }
-    func resolveApproval(id: String, decision: CodexApprovalDecision) async throws {
+    private func validatedApproval(id: String) async throws -> Approval {
         guard running, let approval = approvals[id], approval.snapshot.expiresAt > Date(),
               approval.binding.epoch == epoch, !paused, !changingBoundary,
               activeWorker?.threadID == approval.snapshot.threadID, activeWorker?.turnID == approval.snapshot.turnID else {
@@ -746,7 +802,49 @@ actor GatewayCoordinator {
               normalizeHandle(trusted?.senderHandle ?? "") == normalizeHandle(approval.binding.message.senderHandle) else {
             throw RPCError(message: "The approval's paired conversation is no longer active.")
         }
+        return current
+    }
+    func resolveApproval(id: String, decision: CodexApprovalDecision) async throws {
+        let current = try await validatedApproval(id: id)
+        guard decision != .accept || !current.snapshot.requiresConnectionSetup else {
+            throw RPCError(message: "Reconnect in ChatGPT first. Approval cannot restore access. Then ask Steve to check the connection in a new task.")
+        }
         finishApproval(id: id, decision: decision)
+    }
+    /// Only the local app calls this; URLs never appear in Codable snapshots.
+    /// Stop and join the worker before the browser can display authentication.
+    func openConnectionSetup(id: String, opener: @escaping @MainActor @Sendable (URL) -> Bool) async throws {
+        let approval = try await validatedApproval(id: id)
+        guard approval.snapshot.requiresConnectionSetup, let url = approval.connectionURL else {
+            throw RPCError(message: "This reconnection request is no longer active.")
+        }
+        let worker = workTask, sender = senderTask
+        paused = true
+        let captured = await invalidate(cancelQueued: false)
+        await worker?.value
+        await sender?.value
+        guard running, paused, !changingBoundary, epoch == captured else {
+            throw RPCError(message: "Steve's access changed before reconnection could open.")
+        }
+        try await store.savePaused(true)
+        guard running, paused, !changingBoundary, epoch == captured else { throw CancellationError() }
+        let token = UUID().uuidString
+        try capturePermit.issue(token, kind: .connectionHandoff)
+        connectionHandoffToken = token
+        defer {
+            capturePermit.revoke(token)
+            if connectionHandoffToken == token { connectionHandoffToken = nil }
+        }
+        let permit = capturePermit
+        let opened: Bool
+        do {
+            opened = try await MainActor.run {
+                try permit.withPermit(token, kind: .connectionHandoff) { opener(url) }
+            }
+        } catch { throw RPCError(message: "Reconnection opening was cancelled because Steve's access changed.") }
+        guard opened else {
+            throw RPCError(message: "Steve is paused. Open ChatGPT manually to reconnect, then resume Steve and request a fresh connection check.")
+        }
     }
     private func finishApproval(id: String, decision: CodexApprovalDecision) {
         guard let approval = approvals.removeValue(forKey: id) else { return }
@@ -759,10 +857,10 @@ actor GatewayCoordinator {
     private func phoneApproval(_ text: String, message: SteveInboundMessage) -> (String, CodexApprovalDecision)? {
         let eligible = approvals.values.filter { $0.binding.message.chatGuid == message.chatGuid && normalizeHandle($0.binding.message.senderHandle) == normalizeHandle(message.senderHandle) && $0.snapshot.expiresAt > Date() }
         let fields = text.split(separator: " ").map(String.init)
-        if fields.count == 2, let decision: CodexApprovalDecision = ["approve": .accept, "deny": .decline][fields[0]], let item = eligible.first(where: { $0.snapshot.id.lowercased() == fields[1] }) {
+        if fields.count == 2, let decision: CodexApprovalDecision = ["approve": .accept, "deny": .decline][fields[0]], let item = eligible.first(where: { !$0.snapshot.requiresConnectionSetup && $0.snapshot.id.lowercased() == fields[1] }) {
             return (item.snapshot.id, decision)
         }
-        if eligible.count == 1, eligible[0].snapshot.promptDelivered, let decision: CodexApprovalDecision = ["yes": .accept, "no": .decline][text] { return (eligible[0].snapshot.id, decision) }
+        if eligible.count == 1, !eligible[0].snapshot.requiresConnectionSetup, eligible[0].snapshot.promptDelivered, let decision: CodexApprovalDecision = ["yes": .accept, "no": .decline][text] { return (eligible[0].snapshot.id, decision) }
         return nil
     }
     private func queuePrivatePhoneAccess(_ control: RelayUserControl, inbound: [SteveInboundMessage], epoch: String) async throws {
@@ -813,7 +911,10 @@ actor GatewayCoordinator {
               binding.turnID != nil, !paused, !changingBoundary, request.expiresAt > Date() else { return .cancel }
         let originHost: String?
         let safeMessage: String
-        if let appName = request.nativeAppName {
+        if let setup = request.connectionSetup {
+            originHost = "chatgpt.com"
+            safeMessage = "\(setup.connectorName) needs reconnection in ChatGPT. Open reconnection in Steve on the Mac, or pause Steve and reconnect under ChatGPT → Plugins → \(setup.connectorName). Review the requested permissions yourself. Then resume Steve and ask me to check the connection before continuing. A chat approval cannot reconnect it."
+        } else if let appName = request.nativeAppName {
             guard request.mode == "form", !appName.isEmpty, appName.count <= 200,
                   !appName.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return .cancel }
             originHost = nil
@@ -830,7 +931,7 @@ actor GatewayCoordinator {
             guard let value, value.count <= 100, value.allSatisfy({ $0.isLetter || $0.isNumber || "_-.".contains($0) }) else { return nil }
             return value
         }
-        let snapshot = PendingApprovalSnapshot(id: id, threadID: binding.threadID, turnID: binding.turnID!, message: String(safeMessage.prefix(1200)), originHost: originHost, connector: identifier(request.connector), tool: identifier(request.tool), expiresAt: request.expiresAt)
+        let snapshot = PendingApprovalSnapshot(id: id, threadID: binding.threadID, turnID: binding.turnID!, message: String(safeMessage.prefix(1200)), originHost: originHost, connector: identifier(request.connector), tool: identifier(request.tool), expiresAt: request.expiresAt, requiresConnectionSetup: request.connectionSetup != nil)
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 guard self.running, !Task.isCancelled, self.epoch == binding.epoch else { continuation.resume(returning: .cancel); return }
@@ -838,7 +939,7 @@ actor GatewayCoordinator {
                     try? await Task.sleep(for: .seconds(max(0, request.expiresAt.timeIntervalSinceNow)))
                     if !Task.isCancelled { self.finishApproval(id: id, decision: .cancel) }
                 }
-                approvals[id] = Approval(snapshot: snapshot, binding: binding, continuation: continuation, expiryTask: expiry)
+                approvals[id] = Approval(snapshot: snapshot, binding: binding, continuation: continuation, expiryTask: expiry, connectionURL: request.connectionSetup?.url)
                 Task { await self.sendApprovalPrompt(snapshot, binding: binding) }
             }
         } onCancel: {
@@ -850,7 +951,9 @@ actor GatewayCoordinator {
             try check(binding.epoch)
             guard approvals[approval.id] != nil else { return }
             let context = [approval.connector, approval.tool, approval.originHost].compactMap { $0 }.joined(separator: " · ")
-            let text = "Approval needed\(context.isEmpty ? "" : " (" + context + ")"): \(approval.message)\nReply approve \(approval.id) or deny \(approval.id). This approval expires shortly."
+            let text = approval.requiresConnectionSetup
+                ? "Connection setup required: \(approval.message)"
+                : "Approval needed\(context.isEmpty ? "" : " (" + context + ")"): \(approval.message)\nReply approve \(approval.id) or deny \(approval.id). This approval expires shortly."
             let part = SteveStore.OutboundPart(id: "approval:" + approval.id, chatGuid: binding.message.chatGuid, recipient: binding.message.senderHandle, replyTo: binding.message.guid, inboxGUIDs: [], text: text, attachmentPath: nil, workspace: nil, permission: nil, isControl: true)
             try await store.stageDelivery([part], inboxGUIDs: [], expectedEpoch: binding.epoch)
             scheduleDelivery()
@@ -1029,6 +1132,8 @@ actor SteveRuntime {
 
     func pendingApproval() async -> PendingApprovalSnapshot? { await gateway.pendingApproval() }
     func resolveApproval(id: String, decision: CodexApprovalDecision) async throws { try await gateway.resolveApproval(id: id, decision: decision) }
+
+    func openConnectionSetup(id: String, opener: @escaping @MainActor @Sendable (URL) -> Bool) async throws { try await gateway.openConnectionSetup(id: id, opener: opener) }
 
     nonisolated var capturePermit: SteveCapturePermit { gateway.capturePermit }
     func authorizeVideo() async throws -> SteveVideoAuthorization { try await gateway.authorizeVideo() }
