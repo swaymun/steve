@@ -33,7 +33,9 @@ steve start --json
 
 Without flags in an interactive terminal, setup asks for a workspace and permission choice. Pressing Return preserves the existing choice. `--non-interactive` and `--json` never prompt for terminal input. Setup applies only explicit choices; later sign-in or pairing failure can follow an already-saved configuration change, which is reported in `values.applied`. After a timeout, check status before retrying a mutation.
 
-Choose `read-only`, `workspace-write`, or `danger-full-access` deliberately. A filesystem sandbox does not by itself constrain every external application a Computer Use tool can operate. Model and reasoning effort choices must match the account's current catalog.
+Choose `read-only`, `workspace-write`, or `danger-full-access` deliberately. Full Access runs commands without command approvals and grants routine app/site access for the active task. It does not complete account reconnection, accept unknown forms, or authorize unrelated purchases, bookings, messages, or account changes. Other profiles retain their approval behavior. A filesystem sandbox does not by itself constrain every external application. Model and reasoning effort choices must match the account's current catalog.
+
+When Steve needs a decision, reply “yes” or “no.” It presents one ordinary approval at a time and binds the reply to the prompt already delivered in the paired conversation. Internal approval IDs remain available to the local CLI for diagnostics; they are not required in normal messages.
 
 `setup --login` returns an official browser authentication URL. The human completes that flow. Sign-in pauses Steve. Run doctor afterward to refresh account state, then start to resume after authentication finishes. Grant Steve Full Disk Access in System Settings, then relaunch it. Messages Automation permission is established by an explicitly authorized first reply. Grant the separate Computer Use app its requested Screen Recording and Accessibility permissions. These system prompts cannot be silently approved by onboarding.
 
@@ -91,9 +93,9 @@ Ask Steve to remember, list, or forget a preference. Forget removes the active s
 
 ## Reminders and scheduled tasks
 
-Ask for a reminder or a clearly scoped task with a time and timezone, then inspect the confirmation. For example: “Remind me in two minutes to check the oven; use America/New_York.” You can also ask Steve to list or cancel schedules in normal language. The Mac and Steve must be running for execution; after downtime, missed recurring occurrences are coalesced instead of replaying every missed run.
+Ask normally: “Remind me in two minutes to check the oven.” For a clock time, Steve uses your requested timezone, a saved timezone preference, or the configured timezone and includes it in the confirmation. If needed, say “Remember that my timezone is Eastern time.” You can also ask Steve to list or cancel schedules in normal language. The Mac and Steve must be running for execution; after downtime, missed recurring occurrences are coalesced instead of replaying every missed run.
 
-Schedules remain bound to the paired chat, workspace, and permission choices. An uncertain task or delivery outcome blocks later automatic occurrences until reviewed. A real one-time reminder has been checked across app restart; recurring task behavior and daylight-saving transitions have fixture coverage and still need live acceptance.
+Schedules remain bound to the paired chat, workspace, and permission choices. An uncertain task or delivery outcome blocks later automatic occurrences until reviewed. Live checks verified a one-time reminder across restart and a recurring reminder paused across restart with zero executions. Daylight-saving transitions still need separate installed-device acceptance.
 
 ## Optional payments
 

@@ -33,3 +33,7 @@ Publish only sanitized task outcomes and methodology. Provide useful private del
 ## September 19 pilot results
 
 The [outcome report](practical-benchmark-20260919.md) contains all 16 original attempts, timing, build differences, and focused repair checks. Raw account and recording evidence stays private. A future task-pack version should fence B07's exact expected text: its current sentence punctuation is ambiguous. The frozen v1 prompts and original grades remain unchanged.
+
+## Everyday-language acceptance
+
+The separate [natural request pack](../benchmarks/natural-v1.json) evaluates short messages a person would actually send. Send only `message` and subsequent `followUps`; limits and judge requirements stay outside model input. Steve chooses tools, file paths, verification, and context handling. Do not prepend technical setup instructions or a time budget. Use the explicitly selected permission profile, record any human intervention, and preserve the original pilot scores. These runs test the changed experience and are not a controlled rerun of practical-v1.

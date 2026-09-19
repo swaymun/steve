@@ -424,7 +424,7 @@ final class GatewayLifecycleTests: XCTestCase {
     func testSuccessfulScheduleControlDeliversCreatedIdentifierAndSettlesSession() async throws {
         let quote = "Remind me every Friday at 4 pm America/Chicago to review tasks and tell me its identifier"
         let envelope: [String: Any] = ["schemaVersion": 1, "kind": "relay_request", "action": "control",
-            "control": ["operation": "schedule_create", "userQuote": quote,
+            "control": ["operation": "schedule_create", "userQuote": quote, "includeIdentifiers": true,
                 "schedule": ["name": "Friday review", "prompt": "Review tasks", "kind": "reminder", "timing": "calendar", "timeZone": "America/Chicago", "hour": 16, "minute": 0, "weekdays": [5]]]]
         let reply = String(decoding: try JSONSerialization.data(withJSONObject: envelope), as: UTF8.self)
         let (store, gateway, messages, codex) = try await setup([reply], withAutomation: true)
@@ -440,6 +440,20 @@ final class GatewayLifecycleTests: XCTestCase {
         let session = try await store.agentSession(for: "chat")
         XCTAssertEqual(session?.lastMessageGuid, "schedule-identifier")
         XCTAssertEqual(turns, 1, "Successful control must not run a worker or retry")
+    }
+    func testOrdinaryReminderConfirmationUsesLocalTimeWithoutAnIdentifier() async throws {
+        let control = #"{"schemaVersion":1,"kind":"relay_request","action":"control","control":{"operation":"schedule_create","userQuote":"Remind me in two hours to stretch","schedule":{"name":"Stretch","prompt":"Time to stretch","kind":"reminder","timing":"once","timeZone":"America/New_York","at":"2099-01-05T14:30:00-05:00"}}}"#
+        let (store, gateway, messages, _) = try await setup([control], withAutomation: true)
+        await gateway.start(); await gateway.receive(inbound("ordinary-reminder", text: "Remind me in two hours to stretch"))
+        try await eventually { try await store.queueState("inbound:ordinary-reminder") == "completed" }
+        let automation = try SteveUserAutomationStore(databaseURL: store.databaseURL)
+        let schedules = try await automation.schedules()
+        let schedule = try XCTUnwrap(schedules.first)
+        let sent = await messages.sent.joined()
+        XCTAssertTrue(sent.contains("Reminder set: Stretch"))
+        XCTAssertTrue(sent.contains("2:30 PM (America/New_York)"))
+        XCTAssertFalse(sent.contains(schedule.id))
+        XCTAssertFalse(sent.contains("2099-01-05T"))
     }
     func testFridayScheduleCorrectionPersistsOnceEvenWhenDeliveryIsUncertain() async throws {
         let quote = "Remind me every Friday at 4 pm America/Chicago to review tasks"
@@ -714,10 +728,8 @@ final class GatewayLifecycleTests: XCTestCase {
         await codex.askConnectionSetup(); await gateway.start(); await gateway.receive(inbound("concurrent-connect"))
         try await eventually { await gateway.pendingApproval()?.promptDelivered == true }
         let other = Task { await codex.requestConcurrentOrdinaryApproval() }
-        try await eventually { await messages.sent.contains(where: { $0.contains("Reply approve ") }) }
-        let prompt = await messages.sent.first(where: { $0.contains("Reply approve ") })!
-        let id = prompt.components(separatedBy: "Reply approve ")[1].components(separatedBy: " ")[0]
-        await gateway.receive(inbound("concurrent-accept", text: "approve " + id))
+        try await eventually { await messages.sent.contains(where: { $0.contains("Reply yes or no.") }) }
+        await gateway.receive(inbound("concurrent-accept", text: "yes"))
         let decision = await other.value
         XCTAssertEqual(decision, .accept)
         let setupDecision = await codex.approvalDecision
@@ -732,6 +744,8 @@ final class GatewayLifecycleTests: XCTestCase {
         try await eventually { await gateway.pendingApproval()?.promptDelivered == true }
         let prompt = await messages.sent.joined()
         XCTAssertFalse(prompt.contains("token=secret")); XCTAssertTrue(prompt.contains("example.test"))
+        XCTAssertTrue(prompt.contains("Reply yes or no."))
+        XCTAssertFalse(prompt.contains("Reply approve "))
         let pending = await gateway.pendingApproval()!
         await gateway.receive(inbound("approval-yes", text: "yes"))
         try await eventually { await codex.approvalDecision != nil }
@@ -739,13 +753,79 @@ final class GatewayLifecycleTests: XCTestCase {
         XCTAssertEqual(decision, .accept); XCTAssertNil(remaining)
         do { try await gateway.resolveApproval(id: pending.id, decision: .accept); XCTFail("Approval resolved twice") } catch {}
     }
+    func testFullAccessAutomaticallyAllowsOnlyRoutineAppAndWebsiteAccess() async throws {
+        for native in [true, false] {
+            let (store, gateway, messages, codex) = try await setup([relay, worker])
+            var settings = try await store.getSettings()!
+            settings.permissionProfile = ":danger-full-access"
+            try await store.saveSettings(settings)
+            if native { await codex.askNativeApproval() } else { await codex.askBrowserApproval() }
+            await gateway.start(); await gateway.receive(inbound("routine-access"))
+            try await eventually { await codex.approvalDecision != nil }
+            let decision = await codex.approvalDecision, pending = await gateway.pendingApproval(), sent = await messages.sent
+            XCTAssertEqual(decision, .accept)
+            XCTAssertNil(pending)
+            XCTAssertFalse(sent.joined().contains("Reply yes or no."))
+        }
+    }
+    func testFullAccessStillRequiresHumanForURLAndAccountConnection() async throws {
+        for connection in [true, false] {
+            let (store, gateway, _, codex) = try await setup([relay, worker])
+            var settings = try await store.getSettings()!
+            settings.permissionProfile = "danger-full-access"
+            try await store.saveSettings(settings)
+            if connection { await codex.askConnectionSetup() } else { await codex.askApproval() }
+            await gateway.start(); await gateway.receive(inbound("human-access"))
+            try await eventually { await gateway.pendingApproval()?.promptDelivered == true }
+            let decision = await codex.approvalDecision
+            XCTAssertNil(decision)
+            await gateway.stop()
+        }
+    }
+    func testFullAccessRejectsMismatchedRoutineRequest() async throws {
+        let (store, gateway, _, codex) = try await setup([relay, worker])
+        var settings = try await store.getSettings()!
+        settings.permissionProfile = "danger-full-access"
+        try await store.saveSettings(settings)
+        await codex.askNativeApproval(mismatch: true)
+        await gateway.start(); await gateway.receive(inbound("mismatched-full-access"))
+        try await eventually { await codex.approvalDecision != nil }
+        let decision = await codex.approvalDecision
+        XCTAssertEqual(decision, .cancel)
+    }
+    func testConcurrentApprovalsArePresentedOneAtATimeAndStaleYesCannotMoveOn() async throws {
+        let (_, gateway, messages, codex) = try await setup([relay, worker])
+        await codex.askApproval(); await codex.hold()
+        await gateway.start(); await gateway.receive(inbound("parallel-access"))
+        try await eventually { await gateway.pendingApproval()?.promptDelivered == true }
+        let first = await gateway.pendingApproval()!
+        let second = Task { await codex.requestConcurrentOrdinaryApproval() }
+        // The second request is queued but the first remains the only prompt.
+        try await Task.sleep(for: .milliseconds(30))
+        let before = await messages.sent.filter { $0.contains("Reply yes or no.") }
+        XCTAssertEqual(before.count, 1)
+        await gateway.receive(inbound("first-yes", text: "yes"))
+        try await eventually {
+            let pending = await gateway.pendingApproval()
+            return pending?.id != first.id && pending?.promptDelivered == true
+        }
+        var stale = inbound("late-first-yes", text: "yes")
+        stale.approvalID = first.id
+        await gateway.receive(stale)
+        let stillPending = await gateway.pendingApproval()
+        XCTAssertNotNil(stillPending)
+        await gateway.receive(inbound("second-no", text: "no"))
+        let decision = await second.value
+        XCTAssertEqual(decision, .decline)
+        await gateway.stop()
+    }
     func testNativeAppApprovalUsesSessionScopeAndWaitsForExplicitDecision() async throws {
         let (_, gateway, _, codex) = try await setup([relay, worker])
         await codex.askNativeApproval(); await gateway.start(); await gateway.receive(inbound("native-app-task"))
         try await eventually { await gateway.pendingApproval()?.promptDelivered == true }
         let before = await codex.approvalDecision, pending = await gateway.pendingApproval()!
         XCTAssertNil(before); XCTAssertNil(pending.originHost)
-        XCTAssertEqual(pending.message, "Allow Computer Use to use TextEdit for this session?")
+        XCTAssertEqual(pending.message, "Can I use TextEdit for this task?")
         try await gateway.resolveApproval(id: pending.id, decision: .accept)
         try await eventually { await codex.approvalDecision != nil }
         let decision = await codex.approvalDecision; XCTAssertEqual(decision, .accept)
@@ -866,7 +946,7 @@ final class GatewayLifecycleTests: XCTestCase {
         let before = await codex.approvalDecision
         XCTAssertNil(before)
         await messages.releaseDelivery()
-        try await eventually { await messages.sent.contains { $0.contains("Approval needed") } }
+        try await eventually { await messages.sent.contains { $0.contains("Reply yes or no.") } }
         let after = await codex.approvalDecision
         XCTAssertNil(after)
         let pending = await gateway.pendingApproval()!

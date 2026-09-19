@@ -2,6 +2,16 @@ import XCTest
 @testable import SteveNative
 
 final class ServiceTierTests: XCTestCase {
+    func testFullAccessUsesNoCommandApprovalsOnStartAndResume() async throws {
+        let client = CodexAppServerClient()
+        for id: String? in [nil, "existing-thread"] {
+            let full = try await client.threadParams(cwd: "/fixture", permissionProfile: ":danger-full-access", model: "fixture", developerInstructions: "fixture", threadID: id)
+            XCTAssertEqual(full["sandbox"] as? String, "danger-full-access")
+            XCTAssertEqual(full["approvalPolicy"] as? String, "never")
+            let scoped = try await client.threadParams(cwd: "/fixture", permissionProfile: "workspace-write", model: "fixture", developerInstructions: "fixture", threadID: id)
+            XCTAssertEqual(scoped["approvalPolicy"] as? String, "on-request")
+        }
+    }
     func testLegacySettingsDefaultToStandardAndFastRoundTrips() throws {
         let legacy = Data(#"{"displayName":"Fixture","model":"fixture","effort":"xhigh"}"#.utf8)
         var settings = try JSONDecoder().decode(Settings.self, from: legacy)

@@ -60,6 +60,7 @@ struct RelayUserControl: Codable, Equatable, Sendable {
     let runID: String?
     let resolution: UserScheduleRunState?
     let schedule: RelayScheduleDefinition?
+    var includeIdentifiers: Bool? = nil
 
     func validate() throws {
         guard !userQuote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, userQuote.count <= 4000 else {
@@ -109,17 +110,23 @@ enum UserControlExecutor {
             for schedule in schedules {
                 let runs = try await store.runs(scheduleID: schedule.id)
                 let unresolved = runs.filter { [.claimed, .enqueued, .uncertain].contains($0.state) }
-                var description = "\(schedule.name) (\(schedule.id)): \(schedule.kind.rawValue), \(schedule.state.rawValue), \(schedule.timeZone)"
-                if let next = schedule.nextRunAt { description += ", next " + ISO8601DateFormatter().string(from: next) }
-                if !unresolved.isEmpty { description += "; runs " + unresolved.map { "\($0.id): \($0.state.rawValue)" }.joined(separator: ", ") }
+                let identifier = control.includeIdentifiers == true ? " (\(schedule.id))" : ""
+                var description = "\(schedule.name)\(identifier): \(schedule.state.rawValue)"
+                if let next = schedule.nextRunAt { description += ", next " + displayDate(next, timeZone: schedule.timeZone) }
+                if !unresolved.isEmpty {
+                    description += control.includeIdentifiers == true
+                        ? "; runs " + unresolved.map { "\($0.id): \($0.state.rawValue)" }.joined(separator: ", ")
+                        : "; an earlier result needs checking before this can run again"
+                }
                 descriptions.append(description)
             }
             return descriptions.joined(separator: ". ")
         case .scheduleCreate:
             let definition = control.schedule!
             let created = try await store.createSchedule(requestID: source.guid + ":schedule", name: definition.name, prompt: definition.prompt, kind: definition.kind, rule: try definition.rule(now: now), timeZone: definition.timeZone, authorization: authorization, provenance: provenance, now: now, expectedEpoch: epoch)
-            let next = created.nextRunAt.map { ISO8601DateFormatter().string(from: $0) } ?? "none"
-            return "Scheduled \(created.name) as a \(created.kind.rawValue). Identifier: \(created.id). Next occurrence: \(next) (\(created.timeZone))."
+            let next = created.nextRunAt.map { displayDate($0, timeZone: created.timeZone) } ?? "not scheduled"
+            let identifier = control.includeIdentifiers == true ? " Identifier: \(created.id)." : ""
+            return "\(created.kind == .reminder ? "Reminder set" : "Task scheduled"): \(created.name). Next: \(next).\(identifier)"
         case .schedulePause, .scheduleResume:
             try await store.setSchedulePaused(id: control.scheduleID!, paused: control.operation == .schedulePause, provenance: provenance, now: now, expectedEpoch: epoch)
             return control.operation == .schedulePause ? "Paused that schedule. An already running task is separate; /stop pauses Steve." : "Resumed that schedule. Missed occurrences will coalesce into at most one run."
@@ -130,5 +137,13 @@ enum UserControlExecutor {
             try await store.resolveUncertainRun(id: control.runID!, state: control.resolution!, provenance: provenance, now: now, expectedEpoch: epoch)
             return "Recorded the outcome you supplied. That occurrence will not be replayed."
         }
+    }
+
+    private static func displayDate(_ date: Date, timeZone: String) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: timeZone)
+        formatter.dateFormat = "EEE, MMM d 'at' h:mm a"
+        return formatter.string(from: date) + " (" + timeZone + ")"
     }
 }

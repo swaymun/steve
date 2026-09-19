@@ -19,7 +19,7 @@ The agent needs local tools on the Mac that will run Steve. A web chat without l
 - Incoming messages and outgoing parts are persisted. Restart recovery preserves queued requests. Ambiguous executions or sends are recorded for review rather than automatically replayed.
 - Explicitly saved preferences survive restart and can be listed or forgotten. Reminders and scheduled tasks use durable records and explicit timezones; uncertain outcomes block automatic repetition.
 - One exact private conversation is paired with a short-lived code. Other chats, group conversations, and mismatched senders cannot operate Steve.
-- Say what you want in normal language. `/stop` is the emergency pause command. Say “resume” to continue accepting work or “status” to inspect the current state. A stopped task with uncertain side effects is not automatically rerun.
+- Say what you want in normal language, such as “Remind me in two hours to stretch” or “Find me a good cable organizer under $25.” Steve handles tools, context, and verification; remaining decisions use “yes” or “no.” `/stop` is the emergency pause command. Say “resume” to continue accepting work or “status” to inspect the current state. A stopped task with uncertain side effects is not automatically rerun.
 
 Steve uses read-only access to the local Messages database and public AppleScript sending. It does not require private Messages frameworks, SIP changes, a Messages extension, or an iPhone companion app.
 

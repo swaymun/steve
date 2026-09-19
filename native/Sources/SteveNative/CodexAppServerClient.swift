@@ -1430,7 +1430,7 @@ actor CodexAppServerClient {
         switch normalized {
         case "read-only": return ("read-only", "never")
         case "workspace-write": return ("workspace-write", "on-request")
-        case "danger-full-access": return ("danger-full-access", "on-request")
+        case "danger-full-access": return ("danger-full-access", "never")
         default: throw RPCError(message: "Unsupported permission profile: \(profile)")
         }
     }

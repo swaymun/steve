@@ -94,6 +94,7 @@ actor GatewayCoordinator {
         let continuation: CheckedContinuation<CodexApprovalDecision, Never>
         let expiryTask: Task<Void, Never>
         let connectionURL: URL?
+        var promptQueued = false
     }
     private struct TakeoverGuard {
         let token: String
@@ -109,6 +110,7 @@ actor GatewayCoordinator {
     private var takeoverExpiryTask: Task<Void, Never>?
     private var activeWorker: WorkerBinding?
     private var approvals: [String: Approval] = [:]
+    private var phoneApprovalOrder: [String] = []
     private var initialized = false
     nonisolated let capturePermit = SteveCapturePermit()
     private var paused = false
@@ -848,8 +850,14 @@ actor GatewayCoordinator {
     }
     private func finishApproval(id: String, decision: CodexApprovalDecision) {
         guard let approval = approvals.removeValue(forKey: id) else { return }
+        phoneApprovalOrder.removeAll { $0 == id }
         approval.expiryTask.cancel()
         approval.continuation.resume(returning: decision)
+        presentNextPhoneApproval()
+    }
+    private func presentNextPhoneApproval() {
+        guard let id = phoneApprovalOrder.first, let approval = approvals[id] else { return }
+        Task { await self.sendApprovalPrompt(approval.snapshot, binding: approval.binding) }
     }
     private func cancelApprovals() {
         for id in Array(approvals.keys) { finishApproval(id: id, decision: .cancel) }
@@ -860,7 +868,11 @@ actor GatewayCoordinator {
         if fields.count == 2, let decision: CodexApprovalDecision = ["approve": .accept, "deny": .decline][fields[0]], let item = eligible.first(where: { !$0.snapshot.requiresConnectionSetup && $0.snapshot.id.lowercased() == fields[1] }) {
             return (item.snapshot.id, decision)
         }
-        if eligible.count == 1, !eligible[0].snapshot.requiresConnectionSetup, eligible[0].snapshot.promptDelivered, let decision: CodexApprovalDecision = ["yes": .accept, "no": .decline][text] { return (eligible[0].snapshot.id, decision) }
+        let presented = eligible.filter { !$0.snapshot.requiresConnectionSetup && $0.snapshot.promptDelivered }
+        if presented.count == 1, let decision: CodexApprovalDecision = ["yes": .accept, "no": .decline][text],
+           message.approvalID == nil || message.approvalID == presented[0].snapshot.id {
+            return (presented[0].snapshot.id, decision)
+        }
         return nil
     }
     private func queuePrivatePhoneAccess(_ control: RelayUserControl, inbound: [SteveInboundMessage], epoch: String) async throws {
@@ -918,13 +930,31 @@ actor GatewayCoordinator {
             guard request.mode == "form", !appName.isEmpty, appName.count <= 200,
                   !appName.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return .cancel }
             originHost = nil
-            safeMessage = "Allow Computer Use to use \(appName) for this session?"
+            safeMessage = "Can I use \(appName) for this task?"
         } else {
             guard let origin = request.origin.flatMap({ URLComponents(string: $0) }), origin.scheme?.lowercased() == "https",
                   let host = origin.host, !host.isEmpty, origin.url != nil, origin.user == nil, origin.password == nil else { return .cancel }
             originHost = host
             // Authentication URLs can carry credentials. Only display their host.
-            safeMessage = request.message.replacingOccurrences(of: #"https?://[^\s<>]+"#, with: "[link withheld]", options: [.regularExpression, .caseInsensitive])
+            safeMessage = request.isEmptyBrowserOriginForm
+                ? "Can I open \(host) for this task?"
+                : request.message.replacingOccurrences(of: #"https?://[^\s<>]+"#, with: "[link withheld]", options: [.regularExpression, .caseInsensitive])
+        }
+        // Full Access covers routine, typed app/site access, never arbitrary
+        // URL grants, account reconnection, or unsupported data-entry forms.
+        // Recheck the active boundary after the store awaits before granting.
+        if request.connectionSetup == nil, request.mode == "form",
+           request.nativeAppName != nil || request.isEmptyBrowserOriginForm {
+            let settings = try? await store.getSettings()
+            let trusted = try? await store.trustedConversation()
+            guard running, !Task.isCancelled, !paused, !changingBoundary, epoch == binding.epoch,
+                  request.expiresAt > Date(), activeWorker?.threadID == binding.threadID,
+                  activeWorker?.turnID == binding.turnID,
+                  trusted?.chatGuid == binding.message.chatGuid,
+                  normalizeHandle(trusted?.senderHandle ?? "") == normalizeHandle(binding.message.senderHandle) else { return .cancel }
+            if settings?.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")).lowercased() == "danger-full-access" {
+                return .accept
+            }
         }
         let id = String(UUID().uuidString.prefix(8)).uppercased()
         func identifier(_ value: String?) -> String? {
@@ -940,7 +970,12 @@ actor GatewayCoordinator {
                     if !Task.isCancelled { self.finishApproval(id: id, decision: .cancel) }
                 }
                 approvals[id] = Approval(snapshot: snapshot, binding: binding, continuation: continuation, expiryTask: expiry, connectionURL: request.connectionSetup?.url)
-                Task { await self.sendApprovalPrompt(snapshot, binding: binding) }
+                if snapshot.requiresConnectionSetup {
+                    Task { await self.sendApprovalPrompt(snapshot, binding: binding) }
+                } else {
+                    phoneApprovalOrder.append(id)
+                    presentNextPhoneApproval()
+                }
             }
         } onCancel: {
             Task { await self.finishApproval(id: id, decision: .cancel) }
@@ -949,11 +984,13 @@ actor GatewayCoordinator {
     private func sendApprovalPrompt(_ approval: PendingApprovalSnapshot, binding: WorkerBinding) async {
         do {
             try check(binding.epoch)
-            guard approvals[approval.id] != nil else { return }
-            let context = [approval.connector, approval.tool, approval.originHost].compactMap { $0 }.joined(separator: " · ")
+            guard let pending = approvals[approval.id], !pending.promptQueued,
+                  approval.requiresConnectionSetup || phoneApprovalOrder.first == approval.id else { return }
+            approvals[approval.id]?.promptQueued = true
+            let context = approval.originHost.map { " (" + $0 + ")" } ?? ""
             let text = approval.requiresConnectionSetup
                 ? "Connection setup required: \(approval.message)"
-                : "Approval needed\(context.isEmpty ? "" : " (" + context + ")"): \(approval.message)\nReply approve \(approval.id) or deny \(approval.id). This approval expires shortly."
+                : "\(approval.message)\(context)\nReply yes or no."
             let part = SteveStore.OutboundPart(id: "approval:" + approval.id, chatGuid: binding.message.chatGuid, recipient: binding.message.senderHandle, replyTo: binding.message.guid, inboxGUIDs: [], text: text, attachmentPath: nil, workspace: nil, permission: nil, isControl: true)
             try await store.stageDelivery([part], inboxGUIDs: [], expectedEpoch: binding.epoch)
             scheduleDelivery()
