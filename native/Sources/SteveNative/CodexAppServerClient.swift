@@ -1364,7 +1364,9 @@ actor CodexAppServerClient {
             "serviceTier": serviceTier.wireValue,
             "config": [
                 "service_tier": serviceTier.wireValue,
-                "features.fast_mode": serviceTier == .fast,
+                // App Server 0.153 requires this capability gate even when the
+                // explicit requested tier is Standard/default.
+                "features.fast_mode": true,
                 "model_auto_compact_token_limit": Self.autoCompactionTokenLimit,
                 "model_auto_compact_token_limit_scope": "total"
             ]

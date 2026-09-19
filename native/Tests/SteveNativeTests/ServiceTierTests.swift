@@ -28,7 +28,7 @@ final class ServiceTierTests: XCTestCase {
                 XCTAssertEqual(params["serviceTier"] as? String, tier.wireValue)
                 let config = try XCTUnwrap(params["config"] as? [String: Any])
                 XCTAssertEqual(config["service_tier"] as? String, tier.wireValue)
-                XCTAssertEqual(config["features.fast_mode"] as? Bool, tier == .fast)
+                XCTAssertEqual(config["features.fast_mode"] as? Bool, true, "Standard also needs the tier-confirmation capability gate")
                 XCTAssertNoThrow(try CodexAppServerClient.verifyServiceTier(["serviceTier": tier.resolvedValue], requested: tier))
                 XCTAssertThrowsError(try CodexAppServerClient.verifyServiceTier([:], requested: tier))
             }
