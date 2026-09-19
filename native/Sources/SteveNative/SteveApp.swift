@@ -36,6 +36,28 @@ struct Settings: Codable, Sendable {
     var shellNetworkEnabled: Bool = true
     var burstWindowMs: UInt64 = 1500
     var timezone: String = "UTC"
+    var serviceTier: SteveServiceTier = .standard
+}
+enum SteveServiceTier: String, Codable, CaseIterable, Sendable {
+    case standard, fast
+    var wireValue: String { self == .fast ? "fast" : "default" }
+    var resolvedValue: String { self == .fast ? "priority" : "default" }
+}
+
+extension Settings {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        model = try c.decode(String.self, forKey: .model)
+        effort = try c.decode(String.self, forKey: .effort)
+        defaultPermission = try c.decodeIfPresent(String.self, forKey: .defaultPermission) ?? "workspace-write"
+        permissionProfile = try c.decodeIfPresent(String.self, forKey: .permissionProfile)
+        workspaceRoot = try c.decodeIfPresent(String.self, forKey: .workspaceRoot)
+        shellNetworkEnabled = try c.decodeIfPresent(Bool.self, forKey: .shellNetworkEnabled) ?? true
+        burstWindowMs = try c.decodeIfPresent(UInt64.self, forKey: .burstWindowMs) ?? 1500
+        timezone = try c.decodeIfPresent(String.self, forKey: .timezone) ?? "UTC"
+        serviceTier = try c.decodeIfPresent(SteveServiceTier.self, forKey: .serviceTier) ?? .standard
+    }
 }
 struct Status: Codable, Sendable { let state: String; let detail: String; let connected: Bool }
 struct ModelEntry: Codable, Identifiable, Sendable { let id: String; let model: String?; let displayName: String?; let description: String?; let supportedReasoningEfforts: [ReasoningEffort]; let isDefault: Bool? }
@@ -191,6 +213,7 @@ final class SteveModel: ObservableObject {
     }
     func selectPermission(_ value: String) { run { try await $0.selectPermission(value) } }
     func selectModel(_ value: String) { run { try await $0.selectModel(value) } }
+    func selectServiceTier(_ value: SteveServiceTier) { run { try await $0.selectServiceTier(value.rawValue) } }
     func selectEffort(_ value: String) { run { try await $0.selectEffort(value) } }
     func togglePause() { let value = snapshot?.paused != true; run { try await $0.setPaused(value) } }
     func startPhonePairing() {
@@ -230,6 +253,7 @@ final class SteveModel: ObservableObject {
 
 struct StevePopover: View {
     @ObservedObject var model: SteveModel
+    @State private var tierExpanded = false
     @State private var permissionsExpanded = false; @State private var modelsExpanded = false; @State private var effortsExpanded = false; @State private var advancedExpanded = false; @State private var phoneExpanded = false
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -244,6 +268,7 @@ struct StevePopover: View {
                 disclosure("Default Model", value: humanizeModelLabel(model.snapshot?.settings.model ?? "Not loaded"), expanded: $modelsExpanded) { ForEach(model.snapshot?.models ?? []) { entry in action(humanizeModelLabel(entry.displayName ?? entry.id), subtitle: entry.description ?? modelDescription(entry.id)) { model.selectModel(entry.id) } } }
                 let selected = model.snapshot?.models.first(where: { $0.id == model.snapshot?.settings.model })
                 disclosure("Reasoning Effort", value: humanizeLabel(model.snapshot?.settings.effort ?? "Not loaded"), expanded: $effortsExpanded) { ForEach(selected?.supportedReasoningEfforts ?? [], id: \.reasoningEffort) { effort in action(humanizeLabel(effort.reasoningEffort), subtitle: effort.description ?? reasoningDescription(effort.reasoningEffort)) { model.selectEffort(effort.reasoningEffort) } } }
+                disclosure("Service Tier", value: humanizeLabel(model.snapshot?.settings.serviceTier.rawValue ?? "standard"), expanded: $tierExpanded) { ForEach(SteveServiceTier.allCases, id: \.self) { tier in action(humanizeLabel(tier.rawValue), subtitle: tier == .fast ? "Faster responses; higher usage where available." : "Standard processing.") { model.selectServiceTier(tier) } } }
                 ForEach(model.usageRows) { row in infoRow(row.title, subtitle: row.subtitle) }; Divider()
                 if let phone = model.snapshot?.trustedConversation { DisclosureGroup(isExpanded: $phoneExpanded) { action("Control Chrome from iPhone", action: model.preparePhoneAccess); action("Disconnect Phone", action: model.disconnectPhone) } label: { HStack { Text("Phone connected:"); Spacer(); Text(phoneDisplay(phone.senderHandle)).font(.caption2).foregroundStyle(.secondary).lineLimit(1) } }.padding(.vertical, 5) } else { action("Connect Phone", disabled: !model.canPhone, action: model.startPhonePairing) }
                 if let url = model.phoneAccessURL {

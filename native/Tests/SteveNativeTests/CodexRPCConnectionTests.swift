@@ -30,7 +30,7 @@ final class CodexRPCConnectionTests: XCTestCase {
             var invalid = valid; invalid[key] = value
             XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: invalid), "Unexpected acceptance for " + key)
         }
-        for (key, value): (String, Any) in [("connector_id", "other"), ("tool_name", "click"), ("persist", ["session"]), ("persist", "always"), ("persist", ["always", "forever"]), ("unknown", true), ("persist", [String]()), ("persist", ["session"]), ("persist", NSNull()),
+        for (key, value): (String, Any) in [("connector_id", "other"), ("tool_name", "click"), ("persist", ["session"]), ("persist", "always"), ("persist", ["always", "forever"]), ("persist", [String]()), ("persist", ["session"]), ("persist", NSNull()),
             ("tool_params", ["app": "TextEdit", "command": "fixture"]),
             ("tool_params_display", [["name": "app", "value": "TextEdit"], ["name": "command", "value": "fixture"]]),
             ("tool_params", ["app": "Terminal"]), ("tool_params", ["app": "TextEdit", "command": "unsafe"])] {
@@ -65,6 +65,33 @@ final class CodexRPCConnectionTests: XCTestCase {
         let result = try XCTUnwrap(echo["result"] as? [String: Any])
         let encoded = String(decoding: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), as: UTF8.self)
         XCTAssertEqual(encoded, #"{"_meta":{"persist":"session"},"action":"accept","content":{}}"#)
+    }
+
+    func testLegacyNativeOpaqueMetadataPreservesExactGrantBoundary() throws {
+        var raw = nativeApprovalParams()
+        raw["message"] = "Allow ChatGPT to use Google Chrome?"
+        raw["_meta"] = ["persist": ["always"], "opaque_extension": "fixture-private", "opaque_extension_two": ["action": "always"]]
+        XCTAssertEqual(CodexApprovalRequest.validatedNativeAppName(in: raw), "Google Chrome")
+        // Opaque metadata is not an action payload and never changes scope.
+        let rpc = try nativeApprovalEchoConnection(params: raw)
+        defer { rpc.stop() }
+        rpc.setApprovalHandler { request in XCTAssertEqual(request.nativeAppName, "Google Chrome"); return .accept }
+        let echo = try XCTUnwrap(try rpc.request(method: "fixture") as? [String: Any])
+        let result = try XCTUnwrap(echo["result"] as? [String: Any])
+        XCTAssertEqual(String(decoding: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), as: UTF8.self), #"{"_meta":{"persist":"session"},"action":"accept","content":{}}"#)
+        for (key, value): (String, Any) in [("serverName", "browser-use"), ("message", "Allow ChatGPT to access https://example.invalid?"), ("mode", "url"), ("requestedSchema", ["type": "object", "properties": ["url": ["type": "string"]]])] {
+            var invalid = raw; invalid[key] = value
+            XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: invalid))
+        }
+        for (key, value): (String, Any) in [("codex_approval_kind", "unknown"), ("connector_id", "browser-use"), ("tool_name", "access_browser_origin"), ("tool_params", ["app": "Other App"]), ("tool_params_display", [["name": "app", "value": "Other App"]])] {
+            var invalid = raw; var meta = raw["_meta"] as! [String: Any]
+            meta[key] = value; invalid["_meta"] = meta
+            XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: invalid))
+        }
+        for missing in ["threadId", "turnId"] {
+            var invalid = raw; invalid.removeValue(forKey: missing)
+            XCTAssertNil(CodexApprovalRequest.validatedNativeAppName(in: invalid))
+        }
     }
 
     private func modernNativeApprovalParams() -> [String: Any] {

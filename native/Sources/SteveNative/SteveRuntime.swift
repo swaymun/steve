@@ -44,10 +44,10 @@ extension MessagesService: GatewayMessages {}
 protocol GatewayCodexClient: Sendable {
     func setApprovalHandler(_ handler: CodexApprovalHandler?) async
     func stop() async
-    func startThread(cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool) async throws -> String
-    func resumeThread(threadID: String, cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool) async throws
+    func startThread(cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool, serviceTier: SteveServiceTier) async throws -> String
+    func resumeThread(threadID: String, cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool, serviceTier: SteveServiceTier) async throws
     func compactThread(threadID: String) async throws
-    func runTurn(threadID: String, text: String, attachmentPaths: [String], workspace: String?, model: String, effort: String, onTurnStarted: @escaping @Sendable (String) async -> Void) async throws -> CodexTurnResult
+    func runTurn(threadID: String, text: String, attachmentPaths: [String], workspace: String?, model: String, effort: String, serviceTier: SteveServiceTier, onTurnStarted: @escaping @Sendable (String) async -> Void) async throws -> CodexTurnResult
     func interruptTurn(threadID: String, turnID: String) async throws
 }
 extension CodexAppServerClient: GatewayCodexClient {}
@@ -535,30 +535,30 @@ actor GatewayCoordinator {
 
             if canReuseWorker, let existing {
                 do {
-                    try await codex.resumeThread(threadID: existing.threadID, cwd: workspace, permissionProfile: permission, model: settings.model, developerInstructions: workerInstructions, isRelay: false)
+                    try await codex.resumeThread(threadID: existing.threadID, cwd: workspace, permissionProfile: permission, model: settings.model, developerInstructions: workerInstructions, isRelay: false, serviceTier: settings.serviceTier)
                     workerThreadID = existing.threadID
                 } catch {
                     guard CodexSessionRecovery.shouldReplaceResumedThread(for: error) else { throw error }
                     SteveLog.write("Gateway replacing worker thread chat=\(chatGuid) oldThread=\(existing.threadID)")
-                    workerThreadID = try await codex.startThread(cwd: workspace, permissionProfile: permission, model: settings.model, developerInstructions: workerInstructions, isRelay: false)
+                    workerThreadID = try await codex.startThread(cwd: workspace, permissionProfile: permission, model: settings.model, developerInstructions: workerInstructions, isRelay: false, serviceTier: settings.serviceTier)
                 }
                 if canReuseRelay, let oldRelay = existing.relayThreadID {
                     do {
-                        try await codex.resumeThread(threadID: oldRelay, cwd: workspace, permissionProfile: "read-only", model: settings.model, developerInstructions: relayInstructions, isRelay: true)
+                        try await codex.resumeThread(threadID: oldRelay, cwd: workspace, permissionProfile: "read-only", model: settings.model, developerInstructions: relayInstructions, isRelay: true, serviceTier: settings.serviceTier)
                         relayThreadID = oldRelay
                     } catch {
                         SteveLog.write("Gateway replacing relay thread chat=\(chatGuid) oldThread=\(oldRelay)")
-                        relayThreadID = try await codex.startThread(cwd: workspace, permissionProfile: "read-only", model: settings.model, developerInstructions: relayInstructions, isRelay: true)
+                        relayThreadID = try await codex.startThread(cwd: workspace, permissionProfile: "read-only", model: settings.model, developerInstructions: relayInstructions, isRelay: true, serviceTier: settings.serviceTier)
                     }
                 } else {
                     if existing.relayThreadID != nil {
                         SteveLog.write("Gateway replacing relay for prompt version chat=\(chatGuid) oldVersion=\(existing.relayPromptVersion ?? "none") newVersion=\(StevePrompt.relayPromptVersion)")
                     }
-                    relayThreadID = try await codex.startThread(cwd: workspace, permissionProfile: "read-only", model: settings.model, developerInstructions: relayInstructions, isRelay: true)
+                    relayThreadID = try await codex.startThread(cwd: workspace, permissionProfile: "read-only", model: settings.model, developerInstructions: relayInstructions, isRelay: true, serviceTier: settings.serviceTier)
                 }
             } else {
-                workerThreadID = try await codex.startThread(cwd: workspace, permissionProfile: permission, model: settings.model, developerInstructions: workerInstructions, isRelay: false)
-                relayThreadID = try await codex.startThread(cwd: workspace, permissionProfile: "read-only", model: settings.model, developerInstructions: relayInstructions, isRelay: true)
+                workerThreadID = try await codex.startThread(cwd: workspace, permissionProfile: permission, model: settings.model, developerInstructions: workerInstructions, isRelay: false, serviceTier: settings.serviceTier)
+                relayThreadID = try await codex.startThread(cwd: workspace, permissionProfile: "read-only", model: settings.model, developerInstructions: relayInstructions, isRelay: true, serviceTier: settings.serviceTier)
             }
 
             try check(epoch)
@@ -580,6 +580,7 @@ actor GatewayCoordinator {
                     workspace: workspace,
                     model: settings.model,
                     effort: settings.effort,
+                    serviceTier: settings.serviceTier,
                     onTurnStarted: { turnID in
                         await self.turnStarted(epoch: epoch, threadID: threadID, turnID: turnID)
                     }
@@ -651,7 +652,8 @@ actor GatewayCoordinator {
                         permissionProfile: permission,
                         model: settings.model,
                         developerInstructions: workerInstructions,
-                        isRelay: false
+                        isRelay: false,
+                        serviceTier: settings.serviceTier
                     )
                     try check(epoch)
                     try await savePair(
@@ -1072,6 +1074,13 @@ actor SteveRuntime {
         guard let model = catalog.first(where: { $0.id == settings.model || $0.model == settings.model }), model.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == value }) else { throw RPCError(message: "This reasoning effort is not supported by the selected model.") }
         await gateway.beginBoundaryChange()
         models = catalog; settings.effort = value; try await store.saveSettings(settings)
+        await gateway.endBoundaryChange()
+    }
+    func selectServiceTier(_ value: String) async throws {
+        guard let tier = SteveServiceTier(rawValue: value) else { throw RPCError(message: "Choose standard or fast for service tier.") }
+        await gateway.beginBoundaryChange()
+        settings.serviceTier = tier
+        try await store.saveSettings(settings)
         await gateway.endBoundaryChange()
     }
     func setPaused(_ value: Bool) async throws { try await gateway.setPaused(value) }

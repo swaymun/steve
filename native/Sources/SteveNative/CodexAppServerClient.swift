@@ -566,7 +566,10 @@ struct CodexApprovalRequest: Sendable, Equatable {
 
     private static func legacyNativeAppName(params: [String: Any], meta: [String: Any]) -> String? {
         guard params["serverName"] as? String == "computer-use",
-              Set(meta.keys).isSubset(of: ["persist", "connector_id", "connector_name", "tool_name", "tool_params"]),
+              // The installed native fallback permits opaque metadata extensions.
+              // Reject unsupported typed approval fields instead of interpreting
+              // them as app-access authorization or reflecting them in responses.
+              meta["tool_params_display"] == nil, meta["codex_request_type"] == nil, meta["tool_title"] == nil,
               let persist = meta["persist"] as? [String], persist.contains("always"),
               Set(persist).isSubset(of: ["always", "session"]), Set(persist).count == persist.count,
               let message = params["message"] as? String else { return nil }
@@ -970,7 +973,7 @@ final class CodexRPCConnection: @unchecked Sendable {
             let persistAlways = (meta["persist"] as? [String])?.contains("always") == true
             let nativePrompt = (request.message.hasPrefix("Allow Codex to use ") || request.message.hasPrefix("Allow ChatGPT to use ")) && request.message.hasSuffix("?")
             SteveLog.write("Codex unsupported approval shape modernKind=\(modernKind) nativeConnector=\(nativeConnector) nativeServer=\(nativeServer) knownParams=\(knownParams) knownMeta=\(knownMeta) emptySchema=\(emptySchema) persistAlways=\(persistAlways) nativePrompt=\(nativePrompt)")
-            if modernKind, nativeConnector {
+            if (modernKind && nativeConnector) || nativeServer {
                 SteveLog.write("Codex native approval structure " + CodexApprovalRequest.nativeApprovalShape(in: params))
             }
         }
@@ -1114,21 +1117,22 @@ actor CodexAppServerClient {
         return raw.rateLimits ?? Usage(primary: raw.primary, secondary: raw.secondary)
     }
 
-    func startThread(cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool = false) async throws -> String {
+    func startThread(cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool = false, serviceTier: SteveServiceTier = .standard) async throws -> String {
         let overrides = isRelay ? try await relayToolOverrides(cwd: cwd) : [:]
         let result = try await threadRequest(
             method: "thread/start",
-            params: threadParams(cwd: cwd, permissionProfile: permissionProfile, model: model, developerInstructions: developerInstructions, toolOverrides: overrides)
+            params: threadParams(cwd: cwd, permissionProfile: permissionProfile, model: model, developerInstructions: developerInstructions, toolOverrides: overrides, serviceTier: serviceTier)
         )
+        try Self.verifyServiceTier(result, requested: serviceTier)
         guard let id = result["thread"] as? [String: Any], let threadID = id["id"] as? String else {
             throw RPCError(message: "Codex did not return a thread id")
         }
         return threadID
     }
 
-    func resumeThread(threadID: String, cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool = false) async throws {
+    func resumeThread(threadID: String, cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool = false, serviceTier: SteveServiceTier = .standard) async throws {
         let overrides = isRelay ? try await relayToolOverrides(cwd: cwd) : [:]
-        _ = try await threadRequest(
+        let result = try await threadRequest(
             method: "thread/resume",
             params: threadParams(
                 cwd: cwd,
@@ -1136,9 +1140,11 @@ actor CodexAppServerClient {
                 model: model,
                 developerInstructions: developerInstructions,
                 threadID: threadID,
-                toolOverrides: overrides
+                toolOverrides: overrides,
+                serviceTier: serviceTier
             )
         )
+        try Self.verifyServiceTier(result, requested: serviceTier)
     }
 
     private func relayToolOverrides(cwd: String) async throws -> [String: Any] {
@@ -1213,6 +1219,7 @@ actor CodexAppServerClient {
         workspace: String? = nil,
         model: String,
         effort: String,
+        serviceTier: SteveServiceTier = .standard,
         onTurnStarted: @escaping @Sendable (String) async -> Void = { _ in }
     ) async throws -> CodexTurnResult {
         try await ensureInitialized()
@@ -1221,7 +1228,8 @@ actor CodexAppServerClient {
             "threadId": threadID,
             "input": input,
             "model": model,
-            "effort": effort
+            "effort": effort,
+            "serviceTier": serviceTier.wireValue
         ])
         guard let turn = (result as? [String: Any])?["turn"] as? [String: Any],
               let turnID = turn["id"] as? String else {
@@ -1345,7 +1353,7 @@ actor CodexAppServerClient {
         return try await requestObject(method, params: params)
     }
 
-    func threadParams(cwd: String, permissionProfile: String, model: String, developerInstructions: String, threadID: String? = nil, toolOverrides: [String: Any] = [:]) throws -> [String: Any] {
+    func threadParams(cwd: String, permissionProfile: String, model: String, developerInstructions: String, threadID: String? = nil, toolOverrides: [String: Any] = [:], serviceTier: SteveServiceTier = .standard) throws -> [String: Any] {
         let (sandbox, approvalPolicy) = try permissionContext(permissionProfile)
         var params: [String: Any] = [
             "cwd": cwd,
@@ -1353,7 +1361,10 @@ actor CodexAppServerClient {
             "approvalPolicy": approvalPolicy,
             "sandbox": sandbox,
             "developerInstructions": developerInstructions,
+            "serviceTier": serviceTier.wireValue,
             "config": [
+                "service_tier": serviceTier.wireValue,
+                "features.fast_mode": serviceTier == .fast,
                 "model_auto_compact_token_limit": Self.autoCompactionTokenLimit,
                 "model_auto_compact_token_limit_scope": "total"
             ]
@@ -1365,6 +1376,13 @@ actor CodexAppServerClient {
         SteveLog.write("Codex automatic compaction configured threshold=\(Self.autoCompactionTokenLimit)")
         if let threadID { params["threadId"] = threadID }
         return params
+    }
+
+    nonisolated static func verifyServiceTier(_ response: [String: Any], requested: SteveServiceTier) throws {
+        guard let actual = response["serviceTier"] as? String,
+              actual == requested.resolvedValue || actual == requested.wireValue else {
+            throw RPCError(message: "Codex did not confirm the requested service tier; the task was not started.")
+        }
     }
 
     private func permissionContext(_ profile: String) throws -> (String, String) {

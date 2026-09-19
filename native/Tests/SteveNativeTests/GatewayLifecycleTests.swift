@@ -45,6 +45,9 @@ private actor FixtureCodex: GatewayCodexClient {
     var approvalHandler: CodexApprovalHandler?
     func setApprovalHandler(_ handler: CodexApprovalHandler?) { approvalHandler = handler }
     var inputs: [String] = []
+    var startTiers: [String] = []
+    var resumeTiers: [String] = []
+    var turnTiers: [SteveServiceTier] = []
     var turns = 0
     var activeTurns = 0
     var stops = 0
@@ -64,11 +67,12 @@ private actor FixtureCodex: GatewayCodexClient {
     init(_ results: [String]) { self.results = results }
     func hold() { holdWorker = true }
     func stop() { stops += 1 }
-    func startThread(cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool) -> String { UUID().uuidString }
-    func resumeThread(threadID: String, cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool) {}
+    func startThread(cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool, serviceTier: SteveServiceTier) -> String { startTiers.append((isRelay ? "relay:" : "worker:") + serviceTier.rawValue); return UUID().uuidString }
+    func resumeThread(threadID: String, cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool, serviceTier: SteveServiceTier) { resumeTiers.append((isRelay ? "relay:" : "worker:") + serviceTier.rawValue) }
     func compactThread(threadID: String) {}
     func interruptTurn(threadID: String, turnID: String) {}
-    func runTurn(threadID: String, text: String, attachmentPaths: [String], workspace: String?, model: String, effort: String, onTurnStarted: @escaping @Sendable (String) async -> Void) async throws -> CodexTurnResult {
+    func runTurn(threadID: String, text: String, attachmentPaths: [String], workspace: String?, model: String, effort: String, serviceTier: SteveServiceTier, onTurnStarted: @escaping @Sendable (String) async -> Void) async throws -> CodexTurnResult {
+        turnTiers.append(serviceTier)
         inputs.append(text)
         turns += 1
         activeTurns += 1
@@ -106,6 +110,25 @@ final class GatewayLifecycleTests: XCTestCase {
     private func eventually(_ condition: @escaping () async throws -> Bool) async throws {
         for _ in 0..<150 { if try await condition() { return }; try await Task.sleep(for: .milliseconds(10)) }
         XCTFail("Condition did not become true")
+    }
+    func testServiceTierReachesBothThreadsAndEveryTurnIncludingResume() async throws {
+        let plan = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Done"],"attachments":[]}"#
+        let (store, gateway, _, codex) = try await setup([relay, worker, plan, relay, worker, plan])
+        var settings = try await store.getSettings()!
+        settings.serviceTier = .fast
+        try await store.saveSettings(settings)
+        await gateway.start(); await gateway.receive(inbound("fast-tier"))
+        try await eventually { try await store.queueState("inbound:fast-tier") == "completed" }
+        await gateway.beginBoundaryChange()
+        settings.serviceTier = .standard
+        try await store.saveSettings(settings)
+        await gateway.endBoundaryChange()
+        await gateway.receive(inbound("standard-tier"))
+        try await eventually { try await store.queueState("inbound:standard-tier") == "completed" }
+        let starts = await codex.startTiers, resumes = await codex.resumeTiers, turns = await codex.turnTiers
+        XCTAssertEqual(Set(starts), Set(["relay:fast", "worker:fast"]))
+        XCTAssertEqual(Set(resumes), Set(["relay:standard", "worker:standard"]))
+        XCTAssertEqual(turns, [.fast, .fast, .fast, .standard, .standard, .standard])
     }
     func testRuntimeCapabilitiesReachBothTurnsAndQuoteExactExecutable() async throws {
         let (_, gateway, messages, codex) = try await setup([relay, worker])

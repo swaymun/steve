@@ -10,7 +10,7 @@ enum SteveCLI {
       steve video stop RECORDING_ID [--json]
       steve video cancel [--json]
       setup [--workspace /absolute/path] [--permission PROFILE]
-            [--model ID] [--effort EFFORT] [--login] [--pair] [--tailscale-connect] [--phone-access]
+            [--model ID] [--effort EFFORT] [--service-tier standard|fast] [--login] [--pair] [--tailscale-connect] [--phone-access]
 
     Open Steve.app first. Commands use the running app's permissions and session.
     setup applies only explicit choices. --login returns the official sign-in URL;
@@ -61,7 +61,7 @@ enum SteveCLI {
             case "--login", "--pair", "--tailscale-connect", "--phone-access":
                 guard command == "setup" else { throw RPCError(message: "\(arg) is a setup option.") }
                 request.options[String(arg.dropFirst(2))] = "true"
-            case "--workspace", "--permission", "--model", "--effort":
+            case "--workspace", "--permission", "--model", "--effort", "--service-tier":
                 guard command == "setup", index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else { throw RPCError(message: "\(arg) requires a value on setup.") }
                 index += 1
                 request.options[String(arg.dropFirst(2))] = arguments[index]

@@ -49,7 +49,7 @@ enum SteveControl {
             case "start": try await runtime.setPaused(false)
             case "stop": try await runtime.setPaused(true)
             case "setup":
-                let allowed: Set<String> = ["workspace", "permission", "model", "effort", "login", "pair", "tailscale-connect", "phone-access"]
+                let allowed: Set<String> = ["workspace", "permission", "model", "effort", "service-tier", "login", "pair", "tailscale-connect", "phone-access"]
                 guard Set(request.options.keys).isSubset(of: allowed) else {
                     throw RPCError(message: "Unknown setup option; no changes were applied.")
                 }
@@ -61,6 +61,9 @@ enum SteveControl {
                 }
                 if let value = request.options["model"], !snapshot.models.contains(where: { $0.id == value }) {
                     throw RPCError(message: "Model is not in the signed-in account's current catalog.")
+                }
+                if let value = request.options["service-tier"], SteveServiceTier(rawValue: value) == nil {
+                    throw RPCError(message: "Choose standard or fast for service tier.")
                 }
                 let selected = request.options["model"] ?? snapshot.settings.model
                 if let value = request.options["effort"], !snapshot.models.contains(where: { $0.id == selected && $0.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == value }) }) {
@@ -74,6 +77,7 @@ enum SteveControl {
                 if let value = request.options["permission"] { try await runtime.selectPermission(value); applied.append("permission") }
                 if let value = request.options["model"] { try await runtime.selectModel(value); applied.append("model") }
                 if let value = request.options["effort"] { try await runtime.selectEffort(value); applied.append("effort") }
+                if let value = request.options["service-tier"] { try await runtime.selectServiceTier(value); applied.append("service-tier") }
                 if request.options["login"] == "true" {
                     let login = try await runtime.loginStart()
                     values["authURL"] = login.authURL
