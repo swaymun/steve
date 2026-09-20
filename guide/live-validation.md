@@ -24,7 +24,9 @@ Treat onboarding as a seventeenth **Steve-specific** dimension alongside the 16 
 - Test a missing Messages grant, denied Automation and an unavailable model. Explain the real next step and retain the first task without falsely declaring setup complete.
 - Record time to first useful result, required human steps, unnecessary questions, address mistakes, unsupported assumptions and assisted recovery. Do not count simulated transport as live iMessage acceptance.
 
-See [setup compatibility](setup.md#2-messages-access-and-pairing): v0.1.6 uses the legacy code flow; the owner-capable source update still needs fresh-install live acceptance.
+See [setup compatibility](setup.md#2-messages-access-and-pairing): v0.1.6 uses the legacy code flow. The signed v0.1.7 build 19 passed fresh Steve-state owner selection, a first-message native browser task, the chosen name, repeated setup, and a browser follow-up after restart on the Mac Mini. These checks reused existing macOS grants; granting permissions from scratch and physical iPhone continuation remain separate acceptance checks.
+
+The v0.1.7 runtime checks also verified that internal conversations stay in Steve's private runtime, without adding tasks to the desktop Codex history. An earlier v0.1.7 candidate exercised existing conversation import, browser work, restart, and a calendar read before the final fresh-state checks. Keep migration evidence separate from a fresh installation.
 
 ### Runtime scenarios
 
