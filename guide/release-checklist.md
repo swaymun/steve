@@ -13,7 +13,7 @@ This is an acceptance checklist, not a claim of completed validation.
 - A requested screenshot selects a fresh native capture from the current task turn and arrives as a readable iMessage attachment. Unselected captures are not sent.
 - Phone takeover is tested in iPhone Safari against the actual Mac session: login, pause, disconnect, expiry, revocation, and explicit resume with fresh inspection.
 - Persistent preference and schedule operations have durable outcomes, timezone/restart tests, and real message delivery acceptance.
-- Link setup and test-mode payment flows are verified without a real charge. Real purchases require separate exact authorization and receipt evidence.
+- User-configured MCP integrations remain available to computer-enabled operators; relay and research-helper restrictions remain intact. Verify new integrations with an authorized read.
 - The complete public tree and fresh history are scanned for secrets and personal information. Private diagnostics, old handoffs, histories, screenshots, and evaluation PDFs stay private.
 - The original repository remains preserved privately. The public repository has the intended license and only main after landing.
 - Public release artifacts are signed, notarized, stapled, assessed, and hashed as the final downloadable archive. Source builds and locally signed development bundles are not called notarized releases.

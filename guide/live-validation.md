@@ -36,7 +36,7 @@ Account sign-in problems should be diagnosed separately from Steve's controls. A
 | Task video | Inventory TextEdit windows, select the exact harmless task window, record it without display fallback, and send it. | Only the selected window appears, visible recording indicator, valid H.264 MP4, exact task outcome, received native attachment, and playback checked on the receiving device. |
 | Video audio | With separate authorization for full-display and system-audio scope, repeat on an explicitly selected display with a brief known sound and `--audio`. | Audible system sound in the received clip, no microphone recording, and playback checked on the receiving device. |
 | Video privacy | Cancel through the indicator and request phone takeover during a harmless recording. | No incomplete clip delivered; input/capture permit closed; discarded files absent. |
-| Link test request | Review a fictional purchase envelope and use only the supported test-mode adapter. | Exact test amount/items, stable operation identity, no real charge, no credential-bearing output in model/chat/logs. |
+| MCP integration | Configure and authenticate an authorized MCP server in Codex on Steve's Mac, relaunch Steve, and request a harmless read. | The operator discovers the actual tool and returns its observed result; relay and research-helper restrictions remain intact. |
 
 Keep the browser's saved permissions intact unless the user explicitly asks to change them. A blocked origin cannot be retested through another browser surface as a workaround. A new approval test requires the user's chosen permission setting.
 

@@ -95,6 +95,8 @@ One exact private conversation is paired with a short-lived code. Other chats, g
 
 Optional [phone control](guide/setup.md#phone-control-in-safari) shows the Mac's current browser session in Safari through private Tailscale Serve. Tailscale is required on both devices for this feature; basic messaging and Computer Use do not need it.
 
+Add services through [Codex MCP integrations](guide/setup.md#mcp-integrations) on the Mac running Steve. Its execution operators can use compatible, authenticated servers without a Steve-specific adapter.
+
 ## Development
 
 macOS 14 or later and a Swift toolchain compatible with `native/Package.swift` and its locked dependencies are required.

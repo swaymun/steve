@@ -217,9 +217,13 @@ Ask normally: “Remind me in two minutes to check the oven.” For a clock time
 
 Schedules remain bound to the paired chat, workspace, and permission choices. An uncertain task or delivery outcome blocks later automatic occurrences until reviewed. Live checks verified a one-time reminder across restart and a recurring reminder paused across restart with zero executions. Daylight-saving transitions still need separate installed-device acceptance.
 
-## Optional payments
+## MCP integrations
 
-The source includes an isolated Stripe Link test-mode adapter and deterministic tests. It is not wired into the operator or onboarding, and Steve cannot currently make a purchase through it. Do not provide payment credentials in iMessage. Account setup, a reviewed purchase flow, and live test-mode validation remain future integration work.
+Steve's computer-enabled operators inherit MCP servers configured in Codex on the Mac running Steve. Add a compatible server through Codex's normal MCP configuration, complete its authentication, and verify it with `codex mcp list`. User configuration normally lives in `~/.codex/config.toml`; trusted workspace configuration can also apply. See the [official Codex MCP setup guide](https://developers.openai.com/codex/mcp/) for local STDIO and remote HTTP servers, authentication, and tool settings.
+
+You can ask your setup agent: “Connect this service's MCP server to Codex on this Mac, then verify Steve can use it.” After current tasks finish, quit and relaunch Steve to reload configuration, then try a harmless read through the paired chat. Install and authenticate on Steve's Mac under its macOS user account; configuring a different computer does not configure Steve. Local server executables and required environment variables must be available to the running app, not only an interactive Terminal session.
+
+The relay and background research helpers do not get integration access; Steve routes connected work to an operator with that capability. Each server still needs compatible tools, its own dependencies and sign-in, and the appropriate account access. Adding an integration does not authorize unrelated messages, purchases, or account changes.
 
 ## Troubleshooting and data
 
