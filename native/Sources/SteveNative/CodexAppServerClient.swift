@@ -785,6 +785,7 @@ final class CodexRPCConnection: @unchecked Sendable {
     private var approvalTurns: [String: String] = [:]
     private let executableOverride: URL?
     private let argumentsOverride: [String]
+    let runtimeHome: CodexRuntimeHome?
     private let responseTimeout: TimeInterval
     private let eventTimeout: TimeInterval
     private let approvalTimeout: TimeInterval
@@ -792,6 +793,7 @@ final class CodexRPCConnection: @unchecked Sendable {
     init(executable: URL? = nil, arguments: [String] = [], responseTimeout: TimeInterval = 15, eventTimeout: TimeInterval = 1800, approvalTimeout: TimeInterval = 300, filterUnownedEvents: Bool = false) {
         executableOverride = executable
         argumentsOverride = arguments
+        runtimeHome = executable == nil ? .live : nil
         self.responseTimeout = responseTimeout
         self.eventTimeout = eventTimeout
         self.approvalTimeout = approvalTimeout
@@ -1129,10 +1131,15 @@ final class CodexRPCConnection: @unchecked Sendable {
         process.executableURL = try executableOverride ?? resolveCodex()
         var environment = CodexComputerUseRuntime.sanitizedEnvironment(ProcessInfo.processInfo.environment)
         if executableOverride != nil { process.arguments = argumentsOverride }
-        else if let computerUse = CodexComputerUseRuntime.discover() {
-            process.arguments = ["-c", "thread_unload_delay_secs=0", "-c", "mcp_servers.computer-use=\(computerUse.serverConfiguration)", "app-server"]
-            environment["CODEX_HOME"] = computerUse.codexHome
-        } else { process.arguments = ["-c", "thread_unload_delay_secs=0", "app-server"] }
+        else if let runtimeHome {
+            try runtimeHome.prepare()
+            var arguments = runtimeHome.configurationArguments + ["-c", "thread_unload_delay_secs=0"]
+            if let computerUse = CodexComputerUseRuntime.discover() {
+                arguments += ["-c", "mcp_servers.computer-use=\(computerUse.serverConfiguration)"]
+            }
+            process.arguments = arguments + ["app-server"]
+            environment = runtimeHome.environment(environment)
+        }
         process.environment = environment
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
@@ -1475,7 +1482,7 @@ actor CodexAppServerClient {
         let currentLifecycle = lifecycle
         let task = Task {
             _ = try await self.request("initialize", params: [
-                "clientInfo": ["name": "steve", "version": "0.1.6"],
+                "clientInfo": ["name": "steve", "version": "0.1.7"],
                 "capabilities": ["experimentalApi": true]
             ])
             try Task.checkCancellation()
@@ -1509,9 +1516,21 @@ actor CodexAppServerClient {
         }
         let deadline = Date().addingTimeInterval(5)
         var response: [String: Any]
+        var requestParams = params
+        var attemptedImport = false
         while true {
-            do { response = try await requestObject(method, params: params); break }
+            do { response = try await requestObject(method, params: requestParams); break }
             catch {
+                let message = error.localizedDescription.lowercased()
+                if method == "thread/resume", !attemptedImport,
+                   ["thread not found", "no rollout found", "rollout not found"].contains(where: message.contains),
+                   let id = params["threadId"] as? String, let home = connection.runtimeHome {
+                    attemptedImport = true
+                    if let path = try home.importLegacyThread(id) {
+                        requestParams["path"] = path.path
+                        continue
+                    }
+                }
                 // The loaded list can drop the ID just before the old writer
                 // finishes shutdown. Only this explicit pre-resume condition
                 // is retryable; a turn or ambiguous execution is never retried.

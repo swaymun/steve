@@ -6,7 +6,7 @@ Use the tested account arrangement: Messages on Steve's Mac is signed in to a se
 
 ## Install a release
 
-The [v0.1.6 development preview](https://github.com/swaymun/steve/releases/tag/v0.1.6) contains a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Native Computer Use has separate availability and macOS requirements; inspect its installed app and supported Codex setup flow. Intel builds have not been validated.
+The [v0.1.7 development preview](https://github.com/swaymun/steve/releases/tag/v0.1.7) contains a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Native Computer Use has separate availability and macOS requirements; inspect its installed app and supported Codex setup flow. Intel builds have not been validated.
 
 ### Discover the right download
 
@@ -14,7 +14,7 @@ Steve is currently distributed as a GitHub prerelease. Use the [published releas
 
 An agent should inspect published, non-draft releases in descending version order and choose the newest compatible one. Check the Mac's architecture and macOS version against the release notes, and require both `Steve-macOS.zip` and `Steve-macOS.zip.sha256` in that same release. GitHub's automatic source ZIP/tar archives are not the app. If no compatible app exists, explain the source-build option rather than claiming there is no release.
 
-For this version: [download the app ZIP](https://github.com/swaymun/steve/releases/download/v0.1.6/Steve-macOS.zip) and [its checksum](https://github.com/swaymun/steve/releases/download/v0.1.6/Steve-macOS.zip.sha256). In the download folder:
+For this version: [download the app ZIP](https://github.com/swaymun/steve/releases/download/v0.1.7/Steve-macOS.zip) and [its checksum](https://github.com/swaymun/steve/releases/download/v0.1.7/Steve-macOS.zip.sha256). In the download folder:
 
 ```sh
 shasum -a 256 -c Steve-macOS.zip.sha256
@@ -67,7 +67,7 @@ steve setup --open-permission full-disk-access --json
 
 The helper opens the pane and reveals the installed Steve bundle. The user adds/enables that exact app under Full Disk Access, then relaunches Steve. A grant to Terminal or Codex does not transfer to Steve. A changed signing identity can require the user to remove a stale permission entry and add the current app; do not reset TCC automatically.
 
-**Source/release compatibility:** owner selection, names and personalities below are in the next source update, not the published v0.1.6 app. Inspect the installed executable's `--help`. Prefer the compatible signed release; do not build from source just to avoid a pairing code.
+**Release compatibility:** v0.1.7 adds owner selection, names and personalities. Inspect the installed executable's `--help` before using these options; v0.1.6 and earlier use the code fallback below. Prefer the compatible signed release.
 
 If its help includes `--owner`, ask which exact iMessage address the user will send from. Configure one owner, with optional name and style:
 
@@ -247,4 +247,8 @@ If the CLI cannot connect, open the installed app in the active user session. A 
 
 Codex credentials belong to Codex. Steve stores settings, exact pairing, queue state, and thread IDs in `~/.steve/steve.sqlite3`. The default workspace is `~/.steve/workspace`; existing configured workspaces are preserved. Logs are under `~/Library/Logs/Steve`. Treat all of these as private. Raw benchmark histories stay local.
 
-To uninstall, quit Steve, remove the installed app and optional command wrapper, and remove its login item if enabled in macOS Settings. Keep the data directory and workspace unless you explicitly want to delete them. Disconnect the phone in Steve before handing the Mac to someone else.
+From v0.1.7, Steve's App Server uses `~/.steve/runtime` for its sessions and task database, so internal relay, operator and helper chats stay out of the desktop Codex task list. It reuses existing Codex configuration, plugins, skills and file-based authentication through local links; it never copies credentials or the desktop task database. Keychain-only setups may need to sign in once through Steve. Native Computer Use keeps its existing installation and permissions. [Codex state locations](https://learn.chatgpt.com/docs/config-file/environment-variables#core-locations).
+
+On upgrade, a missing private thread can import its exact Steve-originated legacy transcript when resumed. Existing desktop entries are left intact; no unrelated chats are imported or deleted. The configured workspace and Steve's durable queue, preferences and schedules remain unchanged. Do not point the runtime at the desktop Codex home or link its session/database storage there.
+
+To uninstall, quit Steve, remove the installed app and optional command wrapper, and remove its login item if enabled in macOS Settings. Keep the data directory and workspace unless you explicitly want to delete them. Deleting `~/.steve` removes private runtime history too; unlink shared setup files without following their targets, and never delete `~/.codex` as part of Steve cleanup. Disconnect the phone in Steve before handing the Mac to someone else.

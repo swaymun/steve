@@ -104,7 +104,7 @@ final class SteveNativeTests: XCTestCase {
         )
         XCTAssertTrue(runtime.serverConfiguration.contains("args=[\"mcp\"]"))
         XCTAssertTrue(runtime.serverConfiguration.contains("enabled=true"))
-        XCTAssertTrue(runtime.serverConfiguration.contains("env_vars=[\"CODEX_HOME\"]"))
+        XCTAssertTrue(runtime.serverConfiguration.contains("env={CODEX_HOME=\"/Users/test/.codex\"}"))
         XCTAssertEqual(runtime.environment["CODEX_HOME"], "/Users/test/.codex")
     }
 

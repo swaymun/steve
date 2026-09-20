@@ -18,7 +18,7 @@ struct CodexComputerUseRuntime: Sendable, Equatable {
     }
 
     var serverConfiguration: String {
-        "{command=\"\(tomlString(executablePath))\",args=[\"mcp\"],cwd=\"\(tomlString(workingDirectory))\",enabled=true,env_vars=[\"CODEX_HOME\"]}"
+        "{command=\"\(tomlString(executablePath))\",args=[\"mcp\"],cwd=\"\(tomlString(workingDirectory))\",enabled=true,env={CODEX_HOME=\(CodexRuntimeHome.tomlString(codexHome))}}"
     }
 
     var environment: [String: String] {
