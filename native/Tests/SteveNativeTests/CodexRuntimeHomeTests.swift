@@ -73,6 +73,20 @@ final class CodexRuntimeHomeTests: XCTestCase {
         }
     }
 
+    func testRemovedSQLiteSidecarDoesNotPreventRestart() throws {
+        try fixture { home in
+            try home.prepare()
+            let sidecar = home.root.appendingPathComponent("queue_1.sqlite-shm")
+            try Data("temporary".utf8).write(to: sidecar)
+            let enumerated = try FileManager.default.contentsOfDirectory(at: home.root, includingPropertiesForKeys: nil)
+            XCTAssertTrue(enumerated.contains { $0.lastPathComponent == sidecar.lastPathComponent })
+            try FileManager.default.removeItem(at: sidecar)
+            XCTAssertNoThrow(try CodexRuntimeHome.validateStorageFile(sidecar))
+            try FileManager.default.createSymbolicLink(at: sidecar, withDestinationURL: home.shared.appendingPathComponent("missing.sqlite-shm"))
+            XCTAssertThrowsError(try CodexRuntimeHome.validateStorageFile(sidecar), "A dangling storage link must still fail closed")
+        }
+    }
+
     func testImportsOnlyMatchingSteveRolloutOnceWithoutMovingOriginal() throws {
         try fixture { home in
             let id = UUID().uuidString.lowercased()

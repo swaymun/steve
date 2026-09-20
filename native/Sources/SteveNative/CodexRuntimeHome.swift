@@ -28,12 +28,8 @@ struct CodexRuntimeHome: Sendable {
         }
         // An old/manual storage link must not redirect history into the desktop.
         for file in try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isSymbolicLinkKey])
-            where file.lastPathComponent.contains(".sqlite") || file.lastPathComponent == "history.jsonl" {
-            let attributes = try fm.attributesOfItem(atPath: file.path)
-            guard attributes[.type] as? FileAttributeType == .typeRegular,
-                  (attributes[.referenceCount] as? NSNumber)?.intValue == 1 else {
-                throw RPCError(message: "Steve runtime storage is linked outside its private directory. Remove the storage link before starting Steve.")
-            }
+            where file.lastPathComponent.hasSuffix(".sqlite") || file.lastPathComponent.contains(".sqlite-") || file.lastPathComponent == "history.jsonl" {
+            try Self.validateStorageFile(file)
         }
         var names = ["config.toml", "auth.json", ".credentials.json", "plugins", "skills", "rules", "agents", "AGENTS.md", "AGENTS.override.md"]
         if fm.fileExists(atPath: shared.path) {
@@ -45,6 +41,20 @@ struct CodexRuntimeHome: Sendable {
             // Preserve private settings and existing (including dangling) links.
             guard fm.fileExists(atPath: source.path), (try? fm.attributesOfItem(atPath: target.path)) == nil else { continue }
             try fm.createSymbolicLink(at: target, withDestinationURL: source)
+        }
+    }
+
+    static func validateStorageFile(_ file: URL) throws {
+        let attributes: [FileAttributeKey: Any]
+        do { attributes = try FileManager.default.attributesOfItem(atPath: file.path) }
+        catch let error as CocoaError where [.fileNoSuchFile, .fileReadNoSuchFile].contains(error.code) {
+            // SQLite can remove its WAL/SHM between directory enumeration and
+            // inspection while the old App Server finishes shutting down.
+            return
+        }
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              (attributes[.referenceCount] as? NSNumber)?.intValue == 1 else {
+            throw RPCError(message: "Steve runtime storage is linked outside its private directory. Remove the storage link before starting Steve.")
         }
     }
 
