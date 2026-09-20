@@ -20,6 +20,54 @@ final class UserAutomationTests: XCTestCase {
         try await store.createSchedule(requestID: requestID, name: "Daily summary", prompt: "Summarize the workspace changes.", kind: kind, rule: rule ?? .interval(seconds: 600, firstRun: now), timeZone: "America/New_York", authorization: authorization, provenance: provenance(requestID), now: now)
     }
 
+    func testRelativeReminderUsesElapsedTimeAcrossZonesAndDST() async throws {
+        let (store, _, authorization) = try setup()
+        let start = date("2026-11-01T05:59:30Z")
+        for zone in ["America/New_York", "America/Los_Angeles"] {
+            let json = #"{"name":"Stretch","prompt":"Stretch","kind":"reminder","timing":"once","timeZone":"ZONE","delaySeconds":120}"#.replacingOccurrences(of: "ZONE", with: zone)
+            let definition = try JSONDecoder().decode(RelayScheduleDefinition.self, from: Data(json.utf8))
+            let rule = try definition.rule(now: start)
+            XCTAssertEqual(rule, .once(at: start.addingTimeInterval(120)))
+            _ = try await store.createSchedule(requestID: zone, name: definition.name, prompt: definition.prompt, kind: .reminder, rule: rule, timeZone: zone, authorization: authorization, provenance: provenance(), now: start)
+        }
+        let early = try await store.claimDue(now: start.addingTimeInterval(119), authorization: authorization, dispatchEpoch: "relative")
+        XCTAssertTrue(early.isEmpty)
+        let due = try await store.claimDue(now: start.addingTimeInterval(120), authorization: authorization, dispatchEpoch: "relative")
+        XCTAssertEqual(due.count, 2)
+        XCTAssertTrue(due.allSatisfy { $0.scheduledAt == start.addingTimeInterval(120) })
+    }
+
+    func testRelativeScheduleRejectsConflictingOrInvalidTimingAndKeepsAbsoluteCompatibility() throws {
+        func definition(_ fields: [String: Any]) throws -> RelayScheduleDefinition {
+            var value: [String: Any] = ["name": "Stretch", "prompt": "Stretch", "kind": "reminder", "timeZone": "America/New_York"]
+            value.merge(fields) { _, new in new }
+            return try JSONDecoder().decode(RelayScheduleDefinition.self, from: JSONSerialization.data(withJSONObject: value))
+        }
+        for fields: [String: Any] in [["timing": "once", "delaySeconds": 0], ["timing": "once", "delaySeconds": -1], ["timing": "once", "delaySeconds": 120, "at": "2099-01-01T12:00:00Z"], ["timing": "interval", "delaySeconds": 120, "intervalSeconds": 600], ["timing": "calendar", "delaySeconds": 120, "hour": 9, "minute": 0]] {
+            let decoded = try definition(fields)
+            XCTAssertThrowsError(try decoded.rule(now: now))
+        }
+        let legacy = try definition(["timing": "once", "at": "2099-01-01T12:00:00-05:00"])
+        XCTAssertEqual(try legacy.rule(now: now), .once(at: date("2099-01-01T17:00:00Z")))
+    }
+
+    func testRelayClockIncludesDateCorrectLocalOffset() {
+        XCTAssertTrue(StevePrompt.timeContext(now: date("2026-09-20T18:34:45Z"), timeZone: "America/New_York").contains("CURRENT_LOCAL_TIME:\n2026-09-20T14:34:45-04:00"))
+        XCTAssertTrue(StevePrompt.timeContext(now: date("2026-12-20T18:34:45Z"), timeZone: "America/Los_Angeles").contains("CURRENT_LOCAL_TIME:\n2026-12-20T10:34:45-08:00"))
+    }
+
+    func testMissingScheduleZoneUsesResolvedUserZone() async throws {
+        let (store, url, authorization) = try setup()
+        let control = try JSONDecoder().decode(RelayUserControl.self, from: Data(#"{"operation":"schedule_create","userQuote":"Nudge me in ten minutes.","schedule":{"name":"Nudge","prompt":"Nudge","kind":"reminder","timing":"once","delaySeconds":600}}"#.utf8))
+        let message = SteveInboundMessage(guid: "relative-zone", chatGuid: authorization.chatGUID, senderHandle: authorization.senderHandle, text: control.userQuote, isFromMe: false, isGroup: false, attachmentPaths: [], replyToGuid: nil)
+        let core = try SteveStore(databaseURL: url)
+        try await core.saveGatewayEpoch("zone")
+        _ = try await UserControlExecutor.perform(control, inbound: [message], store: store, authorization: authorization, epoch: "zone", now: now, defaultTimeZone: "America/Los_Angeles")
+        let schedules = try await store.schedules()
+        XCTAssertEqual(schedules.first?.timeZone, "America/Los_Angeles")
+        XCTAssertEqual(schedules.first?.nextRunAt, now.addingTimeInterval(600))
+    }
+
     func testExplicitPreferencesPersistUpdateAndForgetTheirValues() async throws {
         let (store, url, _) = try setup()
         let first = try await store.savePreference(key: "Response Style", value: "Use concise paragraphs.", provenance: provenance("save"), now: now)

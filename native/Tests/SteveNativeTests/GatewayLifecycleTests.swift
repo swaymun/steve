@@ -1244,6 +1244,19 @@ final class GatewayLifecycleTests: XCTestCase {
         XCTAssertEqual(MessagesService.normalizedAccountAddress("E:"), "")
         XCTAssertEqual(MessagesService.normalizedAccountAddress("P:+15550000000"), "+15550000000")
     }
+    func testSameMessageTimezonePreferenceAppliesToScheduleFallback() async throws {
+        let route = #"{"schemaVersion":1,"kind":"relay_request","action":"control","memoryUpdates":[{"operation":"preference_set","key":"timezone","value":"America/Los_Angeles","userQuote":"I'm in Pacific time now"}],"control":{"operation":"schedule_create","userQuote":"remind me every day at 9","schedule":{"name":"Morning check","prompt":"Check in","kind":"reminder","timing":"calendar","hour":9,"minute":0}}}"#
+        let (store, gateway, _, _) = try await setup([route], withAutomation: true)
+        await gateway.start()
+        await gateway.receive(inbound("timezone-schedule", text: "I'm in Pacific time now; remind me every day at 9"))
+        try await eventually { try await store.queueState("inbound:timezone-schedule") == "completed" }
+        let automation = try SteveUserAutomationStore(databaseURL: store.databaseURL)
+        let schedules = try await automation.schedules()
+        XCTAssertEqual(schedules.count, 1)
+        XCTAssertEqual(schedules.first?.timeZone, "America/Los_Angeles")
+        XCTAssertEqual(schedules.first?.rule, .calendar(hour: 9, minute: 0, weekdays: []))
+    }
+
     func testMixedPreferenceAndTaskPreservesExactUserMessage() async throws {
         let route = #"{"schemaVersion":1,"kind":"relay_request","action":"execute","taskTitle":"Dinner","mode":"background","workerPrompt":"Find dinner","memoryUpdates":[{"operation":"preference_set","key":"diet","value":"vegetarian","userQuote":"I'm vegetarian"}]}"#
         let delivery = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Two good options."]}"#

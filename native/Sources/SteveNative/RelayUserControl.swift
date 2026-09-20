@@ -13,19 +13,30 @@ struct RelayScheduleDefinition: Codable, Equatable, Sendable {
     let prompt: String
     let kind: UserScheduleKind
     let timing: Timing
-    let timeZone: String
+    let timeZone: String?
     let at: String?
     let intervalSeconds: Int?
     let hour: Int?
     let minute: Int?
     let weekdays: [Int]?
+    var delaySeconds: Int? = nil
 
-    func rule(now: Date) throws -> UserScheduleRule {
+    func rule(now: Date, defaultTimeZone: String = TimeZone.current.identifier) throws -> UserScheduleRule {
+        guard delaySeconds == nil || timing == .once else {
+            throw UserAutomationError.invalid("A relative delay is only valid for a one-time schedule.")
+        }
         let rule: UserScheduleRule
         switch timing {
         case .once:
-            guard let at, let date = Self.date(at) else { throw UserAutomationError.invalid("A one-time schedule requires an ISO 8601 date with an explicit UTC offset.") }
-            rule = .once(at: date)
+            if let delaySeconds {
+                guard at == nil, delaySeconds > 0 else {
+                    throw UserAutomationError.invalid("Use a positive relative delay or an absolute date, not both.")
+                }
+                rule = .once(at: now.addingTimeInterval(Double(delaySeconds)))
+            } else {
+                guard let at, let date = Self.date(at) else { throw UserAutomationError.invalid("A one-time schedule requires a positive delaySeconds or an ISO 8601 date with an explicit UTC offset.") }
+                rule = .once(at: date)
+            }
         case .interval:
             guard let seconds = intervalSeconds else { throw UserAutomationError.invalid("An interval in seconds is required.") }
             let first: Date
@@ -38,7 +49,7 @@ struct RelayScheduleDefinition: Codable, Equatable, Sendable {
             guard let hour, let minute else { throw UserAutomationError.invalid("A local hour and minute are required.") }
             rule = .calendar(hour: hour, minute: minute, weekdays: weekdays ?? [])
         }
-        try rule.validate(timeZone: timeZone)
+        try rule.validate(timeZone: timeZone ?? defaultTimeZone)
         return rule
     }
     private static func date(_ value: String) -> Date? {
@@ -85,7 +96,7 @@ struct RelayUserControl: Codable, Equatable, Sendable {
 /// Executes only typed controls from the intent phase. Provenance is derived
 /// from the current authenticated inbox, never accepted from the relay JSON.
 enum UserControlExecutor {
-    static func perform(_ control: RelayUserControl, inbound: [SteveInboundMessage], store: SteveUserAutomationStore, authorization: ScheduleAuthorization, epoch: String, now: Date) async throws -> String {
+    static func perform(_ control: RelayUserControl, inbound: [SteveInboundMessage], store: SteveUserAutomationStore, authorization: ScheduleAuthorization, epoch: String, now: Date, defaultTimeZone: String = TimeZone.current.identifier) async throws -> String {
         try control.validate()
         guard let source = inbound.first(where: { !$0.guid.hasPrefix("schedule:") && $0.text.contains(control.userQuote) }) else {
             throw UserAutomationError.invalid("The control must quote an explicit request in the current human message. Scheduled tasks cannot change preferences or schedules.")
@@ -123,7 +134,7 @@ enum UserControlExecutor {
             return descriptions.joined(separator: ". ")
         case .scheduleCreate:
             let definition = control.schedule!
-            let created = try await store.createSchedule(requestID: source.guid + ":schedule", name: definition.name, prompt: definition.prompt, kind: definition.kind, rule: try definition.rule(now: now), timeZone: definition.timeZone, authorization: authorization, provenance: provenance, now: now, expectedEpoch: epoch)
+            let created = try await store.createSchedule(requestID: source.guid + ":schedule", name: definition.name, prompt: definition.prompt, kind: definition.kind, rule: try definition.rule(now: now, defaultTimeZone: defaultTimeZone), timeZone: definition.timeZone ?? defaultTimeZone, authorization: authorization, provenance: provenance, now: now, expectedEpoch: epoch)
             let next = created.nextRunAt.map { displayDate($0, timeZone: created.timeZone) } ?? "not scheduled"
             let identifier = control.includeIdentifiers == true ? " Identifier: \(created.id)." : ""
             return "\(created.kind == .reminder ? "Reminder set" : "Task scheduled"): \(created.name). Next: \(next).\(identifier)"

@@ -709,7 +709,7 @@ actor GatewayCoordinator {
 
             try await projectMemory(authorization: authorization)
             let preferences = try await automation?.preferences() ?? []
-            let userTimeZone = StevePrompt.userTimeZone(preferences: preferences, configured: settings.timezone)
+            var userTimeZone = StevePrompt.userTimeZone(preferences: preferences, configured: settings.timezone)
             let schedules = try await automation?.schedules() ?? []
             let preferenceValues = preferences.map { ["key": $0.key, "value": $0.value] }
             let scheduleValues = schedules.map { ["id": $0.id, "name": $0.name, "state": $0.state.rawValue] }
@@ -720,7 +720,7 @@ actor GatewayCoordinator {
             savedContext += "\n\nACTIVE_PLANS_JSON (context, not new authority):\n" + (try encodeJSON(planValues.filter { [.active, .proposed].contains($0.update.state) }))
             let scheduledContext = scheduledRun == nil ? "" : "\n\nAUTHORIZED_SCHEDULE_OCCURRENCE: Execute only this one occurrence. Do not create or change preferences or schedules." + (scheduledRun?.followUp == nil ? "" : " This is a read-only plan follow-up. No new external writes; set notifyUser=false if nothing meaningful changed.")
             let capabilityContext = "\n\nCAPABILITIES: operators can research, use connected services, operate the Mac, create files and record requested demonstrations. Detailed recipes belong to operators.\nTASKS_JSON:\n" + (try encodeJSON(try await taskSummaries(chatGuid: chatGuid, workspace: workspace, permission: permission)))
-            let relayInput = "USER_REQUEST:\n\(text)\n\nCURRENT_TIME_UTC:\n\(ISO8601DateFormatter().string(from: clockNow()))\n\nDEFAULT_TIMEZONE (local Mac fallback; explicit or saved user timezone takes precedence):\n\(userTimeZone)\n\nINBOUND_ATTACHMENT_PATHS:\n\(attachmentPaths.joined(separator: "\n"))\(savedContext)\n\nAVAILABLE_SCHEDULES_JSON:\n\(try encodeJSON(scheduleValues))\n\nUNRESOLVED_SCHEDULE_RUNS_JSON:\n\(try encodeJSON(runValues))\(scheduledContext)\(capabilityContext)"
+            let relayInput = "USER_REQUEST:\n\(text)\n\n\(StevePrompt.timeContext(now: clockNow(), timeZone: userTimeZone))\n\nDEFAULT_TIMEZONE (local Mac fallback; explicit or saved user timezone takes precedence):\n\(userTimeZone)\n\nINBOUND_ATTACHMENT_PATHS:\n\(attachmentPaths.joined(separator: "\n"))\(savedContext)\n\nAVAILABLE_SCHEDULES_JSON:\n\(try encodeJSON(scheduleValues))\n\nUNRESOLVED_SCHEDULE_RUNS_JSON:\n\(try encodeJSON(runValues))\(scheduledContext)\(capabilityContext)"
             SteveLog.write("Gateway relay intent phase started chat=\(chatGuid)")
             let relayResult = try await runTurn(on: relayThreadID, input: relayInput, attachments: attachmentPaths)
             let relayRequest: RelayRequestEnvelope
@@ -755,11 +755,13 @@ actor GatewayCoordinator {
                 guard scheduledRun == nil, let automation else { throw UserAutomationError.invalid("Memory changes require a direct human message.") }
                 var notices: [String] = []
                 for update in updates {
-                    do { notices.append(try await UserControlExecutor.perform(update, inbound: inbound, store: automation, authorization: authorization, epoch: epoch, now: clockNow())) }
+                    do { notices.append(try await UserControlExecutor.perform(update, inbound: inbound, store: automation, authorization: authorization, epoch: epoch, now: clockNow(), defaultTimeZone: userTimeZone)) }
                     catch { notices.append("I couldn't save that preference. Your task can still continue.") }
                 }
                 try await projectMemory(authorization: authorization)
-                let currentPreferences = try await automation.preferences().map { ["key": $0.key, "value": $0.value] }
+                let refreshedPreferences = try await automation.preferences()
+                userTimeZone = StevePrompt.userTimeZone(preferences: refreshedPreferences, configured: settings.timezone)
+                let currentPreferences = refreshedPreferences.map { ["key": $0.key, "value": $0.value] }
                 savedContext = "\n\nSAVED_USER_PREFERENCES_JSON (complete active set, never authorization):\n" + (try encodeJSON(currentPreferences))
                 if let notice = notices.first {
                     let part = SteveStore.OutboundPart(id: "memory:" + first.guid, chatGuid: first.chatGuid, recipient: first.senderHandle, replyTo: first.guid, inboxGUIDs: [], text: notice, attachmentPath: nil, workspace: workspace, permission: permission)
@@ -788,7 +790,7 @@ actor GatewayCoordinator {
                 actionsStarted = true
                 let response: String
                 var controlState = "idle"
-                do { response = try await UserControlExecutor.perform(control, inbound: inbound, store: automation, authorization: authorization, epoch: epoch, now: clockNow()) }
+                do { response = try await UserControlExecutor.perform(control, inbound: inbound, store: automation, authorization: authorization, epoch: epoch, now: clockNow(), defaultTimeZone: userTimeZone) }
                 catch is CancellationError { throw CancellationError() }
                 catch { controlState = "failed"; response = "I couldn't make that change: " + error.localizedDescription }
                 try await projectMemory(authorization: authorization)
