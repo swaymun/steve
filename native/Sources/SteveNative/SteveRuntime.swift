@@ -1,4 +1,5 @@
 import Foundation
+import PDFKit
 
 enum CodexSessionRecovery {
     static func shouldReplaceResumedThread(for error: Error) -> Bool {
@@ -1650,20 +1651,56 @@ extension GatewayCoordinator {
             quiescent = true
             activeWorkers.removeValue(forKey: threadID)
             await steeringTasks[launched.id]?.value
-            let envelope = try AgentEnvelopeParser.workerResult(from: result.text)
-            let verified = try verifiedArtifacts(from: envelope, workspace: launched.workspace, nativeCapturePaths: result.nativeCapturePaths)
-            let accepted = WorkerResultEnvelope(schemaVersion: envelope.schemaVersion, kind: envelope.kind, status: envelope.status, summary: envelope.summary, userQuestion: envelope.userQuestion, artifacts: verified, blocker: envelope.blocker, plan: envelope.plan, notifyUser: envelope.notifyUser)
-            if launched.mode == .computer, envelope.blocker?.reason == .signIn, envelope.blocker?.pageVerified == true {
+            var envelope = try AgentEnvelopeParser.workerResult(from: result.text)
+            var verified = try verifiedArtifacts(from: envelope, workspace: launched.workspace, nativeCapturePaths: result.nativeCapturePaths)
+            func needsReadableFormat(_ files: [WorkerArtifactEnvelope], task: OperatorTaskRecord) -> Bool {
+                guard !StevePrompt.markdownRequested(in: (task.originalMessages ?? task.inbound).map(\.text)) else { return false }
+                return files.contains { ["md", "markdown", "mdown", "mkd"].contains(URL(fileURLWithPath: $0.path).pathExtension.lowercased()) || $0.mimeType?.lowercased().contains("markdown") == true }
+            }
+            guard let latest = try await store.operatorTask(id: launched.id), latest.runID == launched.runID, latest.state == .running else { throw CancellationError() }
+            try check(epoch)
+            if !(launched.mode == .background && envelope.status == .needsComputer), needsReadableFormat(verified, task: latest) {
+                let originalArtifacts = verified
+                let targetExtension = StevePrompt.readableDocumentExtension(in: (latest.originalMessages ?? latest.inbound).map(\.text))
+                activeWorkers[threadID] = WorkerBinding(epoch: epoch, threadID: threadID, taskID: launched.id, turnID: nil, message: first)
+                quiescent = false
+                let repair = "Your completed work is retained. Only repair the deliverable format: convert the Markdown attachments below into readable \(targetExtension.uppercased()) files, reopen and verify them, then return the same result and any blocker with corrected artifacts. Keep each artifact ID, replacing each Markdown file with the requested format and retaining all other artifacts. Do not repeat external actions or do new research. The user did not request Markdown.\nVERIFIED_ARTIFACTS_JSON:\n" + (try encodeJSON(verified)) + "\nCOMPLETED_RESULT_JSON:\n" + (try encodeJSON(envelope))
+                let repaired = try await codex.runTurn(threadID: threadID, text: repair, attachmentPaths: [], workspace: current.workspace,
+                    model: settings.model, effort: settings.effort, serviceTier: settings.serviceTier, onProgress: { event in
+                        await self.operatorProgress(taskID: launched.id, runID: launched.runID, text: event.text, epoch: epoch)
+                    }, onTurnStarted: { turnID in
+                        await self.operatorTurnStarted(taskID: launched.id, epoch: epoch, threadID: threadID, turnID: turnID)
+                    })
+                try check(epoch)
+                try await codex.stopDescendants(threadID: threadID)
+                quiescent = true
+                activeWorkers.removeValue(forKey: threadID)
+                await steeringTasks[launched.id]?.value
+                envelope = try AgentEnvelopeParser.workerResult(from: repaired.text)
+                verified = try verifiedArtifacts(from: envelope, workspace: launched.workspace, nativeCapturePaths: result.nativeCapturePaths + repaired.nativeCapturePaths)
+                guard let afterRepair = try await store.operatorTask(id: launched.id), afterRepair.runID == launched.runID, afterRepair.state == .running else { throw CancellationError() }
+                guard !needsReadableFormat(verified, task: afterRepair), originalArtifacts.allSatisfy({ original in
+                    guard let replacement = verified.first(where: { $0.id == original.id }) else { return false }
+                    if ["md", "markdown", "mdown", "mkd"].contains(URL(fileURLWithPath: original.path).pathExtension.lowercased()) || original.mimeType?.lowercased().contains("markdown") == true {
+                        return URL(fileURLWithPath: replacement.path).pathExtension.lowercased() == targetExtension
+                            && (targetExtension != "pdf" || (PDFDocument(url: URL(fileURLWithPath: replacement.path))?.pageCount ?? 0) > 0)
+                    }
+                    return replacement.path == original.path
+                }) else { throw AgentEnvelopeError.invalidPayload("The task did not prepare readable replacement files after one format correction") }
+            }
+            let finalEnvelope = envelope
+            let accepted = WorkerResultEnvelope(schemaVersion: finalEnvelope.schemaVersion, kind: finalEnvelope.kind, status: finalEnvelope.status, summary: finalEnvelope.summary, userQuestion: finalEnvelope.userQuestion, artifacts: verified, blocker: finalEnvelope.blocker, plan: finalEnvelope.plan, notifyUser: finalEnvelope.notifyUser)
+            if launched.mode == .computer, finalEnvelope.blocker?.reason == .signIn, finalEnvelope.blocker?.pageVerified == true {
                 loginReservation = (launched.id, launched.runID, clockNow().addingTimeInterval(120))
             }
             try await store.updateOperatorTask(id: launched.id, expectedEpoch: epoch, expectedRunID: launched.runID) { task in
                 guard task.state == .running else { throw CancellationError() }
-                task.summary = envelope.summary
+                task.summary = finalEnvelope.summary
                 task.result = accepted
-                if let blocker = envelope.blocker {
+                if let blocker = finalEnvelope.blocker {
                     task.handoff = TaskHandoff(taskID: task.id, runID: task.runID, blocker: blocker, createdAt: self.clockNow())
                 }
-                if envelope.status == .needsComputer && task.mode == .background {
+                if finalEnvelope.status == .needsComputer && task.mode == .background {
                     task.mode = .computer; task.state = .queued
                     task.objective = "Continue your same task using the connected services and Computer Use now available. Verify current state before actions. Original goal:\n" + task.objective
                     task.contextAction = .reuse
@@ -1671,7 +1708,7 @@ extension GatewayCoordinator {
                     task.state = .awaitingDelivery
                 }
             }
-            SteveLog.write("Operator completed mode=\(launched.mode.rawValue) seconds=\(Int(Date().timeIntervalSince(start))) status=\(envelope.status.rawValue)")
+            SteveLog.write("Operator completed mode=\(launched.mode.rawValue) seconds=\(Int(Date().timeIntervalSince(start))) status=\(finalEnvelope.status.rawValue)")
         } catch {
             if let threadID, self.epoch == epoch {
                 for id in approvals.keys.filter({ approvals[$0]?.binding.threadID == threadID }) { finishApproval(id: id, decision: .cancel) }

@@ -1,5 +1,6 @@
 import XCTest
 import SQLite
+import PDFKit
 @testable import SteveNative
 
 private final class FixtureClock: @unchecked Sendable {
@@ -636,6 +637,62 @@ final class GatewayLifecycleTests: XCTestCase {
         let sent = await messages.sent, captions = await messages.attachmentCaptions
         XCTAssertEqual(sent, ["Ready. See source (https://example.com).", file.path])
         XCTAssertEqual(captions, ["Guide with steps and source (https://example.com)."])
+    }
+
+    func testMarkdownDeliveryConvertsOnceUnlessExplicitlyRequested() async throws {
+        for (outputExtension, request) in [("pdf", "Send me that guide."), ("md", "Send the guide as Markdown."), ("docx", "Send an editable Word document.")] {
+            let wantsMarkdown = outputExtension == "md"
+            let (store, gateway, messages, codex) = try await setup([])
+            let root = store.databaseURL.deletingLastPathComponent()
+            let md = root.appendingPathComponent("guide.md"), pdf = root.appendingPathComponent("guide." + outputExtension)
+            try Data("# Guide\nVerified facts".utf8).write(to: md)
+            let document = PDFDocument(), page = PDFPage()
+            page.setBounds(CGRect(x: 0, y: 0, width: 612, height: 792), for: .mediaBox)
+            document.insert(page, at: 0)
+            if !wantsMarkdown { XCTAssertTrue(document.write(to: pdf)) }
+            func result(_ file: URL) throws -> String {
+                String(decoding: try JSONEncoder().encode(WorkerResultEnvelope(schemaVersion: 1, kind: "worker_result", status: .completed, summary: "Verified guide", userQuestion: nil, artifacts: [.init(id: "guide", path: file.path, caption: nil, mimeType: nil)])), as: UTF8.self)
+            }
+            let plan = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Ready."],"attachments":[{"artifactID":"guide"}]}"#
+            try await codex.appendResults([relay, result(md)] + (wantsMarkdown ? [] : [result(pdf)]) + [plan])
+            await gateway.start(); await gateway.receive(inbound("format", text: request))
+            try await eventually { try await store.queueState("inbound:format") == "completed" }
+            let sent = await messages.sent, inputs = await codex.inputs
+            XCTAssertEqual(sent, ["Ready.", wantsMarkdown ? md.path : pdf.path])
+            XCTAssertEqual(inputs.count, wantsMarkdown ? 3 : 4)
+            if !wantsMarkdown { XCTAssertTrue(inputs[2].contains("Do not repeat external actions or do new research.")) }
+        }
+    }
+
+    func testFailedFormatCorrectionDoesNotSendMarkdownOrLoop() async throws {
+        for badExtension in ["md", "txt", "pdf", "missing"] {
+            let (store, gateway, messages, codex) = try await setup([])
+            let root = store.databaseURL.deletingLastPathComponent()
+            let md = root.appendingPathComponent("guide.md"), bad = root.appendingPathComponent("bad." + badExtension)
+            try Data("# Guide".utf8).write(to: md); try Data("Not a PDF".utf8).write(to: bad)
+            func result(_ file: URL?) throws -> String {
+                String(decoding: try JSONEncoder().encode(WorkerResultEnvelope(schemaVersion: 1, kind: "worker_result", status: .completed, summary: "Guide ready", userQuestion: nil, artifacts: file.map { [.init(id: "guide", path: $0.path, caption: nil, mimeType: nil)] } ?? [])), as: UTF8.self)
+            }
+            try await codex.appendResults([relay, result(md), result(badExtension == "missing" ? nil : bad)])
+            await gateway.start(); await gateway.receive(inbound("format-failed", text: "Send me the guide."))
+            try await eventually { try await store.queueState("inbound:format-failed") == "uncertain" }
+            let sent = await messages.sent, turns = await codex.turns
+            XCTAssertFalse(sent.contains(md.path)); XCTAssertFalse(sent.contains(bad.path)); XCTAssertEqual(turns, 3)
+        }
+    }
+
+    func testMarkdownPendingComputerPromotionIsNotConvertedInBackground() async throws {
+        let (store, gateway, messages, codex) = try await setup([])
+        let root = store.databaseURL.deletingLastPathComponent(), md = root.appendingPathComponent("guide.md")
+        try Data("# Guide".utf8).write(to: md)
+        let pending = String(decoding: try JSONEncoder().encode(WorkerResultEnvelope(schemaVersion: 1, kind: "worker_result", status: .needsComputer, summary: "Need file tools to finish", userQuestion: nil, artifacts: [.init(id: "guide", path: md.path, caption: nil, mimeType: nil)])), as: UTF8.self)
+        let plan = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Done."]}"#
+        await codex.appendResults([relay.replacingOccurrences(of: "computer", with: "background"), pending, worker, plan])
+        await gateway.start(); await gateway.receive(inbound("promote-format"))
+        try await eventually { try await store.queueState("inbound:promote-format") == "completed" }
+        let inputs = await codex.inputs, tasks = try await store.operatorTasks(), sent = await messages.sent
+        XCTAssertEqual(inputs.count, 4); XCTAssertTrue(inputs[2].contains("Continue your same task"))
+        XCTAssertEqual(tasks.first?.mode, .computer); XCTAssertFalse(sent.contains(md.path))
     }
     func testNativeCaptureRequiresExplicitSelectionAndCurrentTurnEvidence() async throws {
         let (store, gateway, _, _) = try await setup([])

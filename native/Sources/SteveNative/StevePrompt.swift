@@ -17,6 +17,43 @@ enum StevePrompt {
         return "CURRENT_LOCAL_TIME:\n\(formatter.string(from: now))\n\nCURRENT_TIME_UTC:\n\(ISO8601DateFormatter().string(from: now))"
     }
 
+    static func markdownRequested(in messages: [String]) -> Bool {
+        requestedDocumentExtension(in: messages) == "md"
+    }
+
+    static func readableDocumentExtension(in messages: [String]) -> String {
+        requestedDocumentExtension(in: messages) ?? "pdf"
+    }
+
+    private static func requestedDocumentExtension(in messages: [String]) -> String? {
+        let formats = [("md", #"\bMarkdown\b|\.(?:md|markdown|mdown|mkd)\b"#), ("pdf", #"\bPDFs?\b"#),
+                       ("docx", #"\b(?:Word(?: document| file)?|docx)\b"#), ("xlsx", #"\b(?:Excel|spreadsheet|xlsx)\b"#),
+                       ("pptx", #"\b(?:PowerPoint|pptx)\b"#), ("csv", #"\bCSV\b"#),
+                       ("txt", #"\b(?:plain text|txt file)\b"#), ("html", #"\bHTML\b"#)]
+        // Explicit conversion/output phrases outrank source-format mentions.
+        let introductions = [#"\b(?:as|in|into)\s+(?:an?\s+)?(?:editable\s+)?"#,
+                             #"\b(?:send|give|return|deliver|attach|export|want(?:ed)?|need|prefer|use|create|make|actually|instead)\b[^.!?\n]{0,50}?"#,
+                             #"^\s*(?:an?\s+)?(?:editable\s+)?"#]
+        for message in messages.reversed() {
+            for introduction in introductions {
+                var choices: [(String, Int)] = []
+                for (ext, format) in formats {
+                    guard let regex = try? NSRegularExpression(pattern: "(?i)" + introduction + "(" + format + ")") else { continue }
+                    for match in regex.matches(in: message, range: NSRange(message.startIndex..., in: message)) {
+                        guard let range = Range(match.range(at: 1), in: message), let whole = Range(match.range, in: message) else { continue }
+                        let clause = message[..<range.lowerBound].split(whereSeparator: { ".!?;,\n".contains($0) }).last.map(String.init) ?? ""
+                        guard clause.range(of: #"(?i)\b(?:no|not|never|avoid|without|don['’]t)\b"#, options: .regularExpression) == nil,
+                              message[whole].range(of: #"(?i)\bfrom\b"#, options: .regularExpression) == nil else { continue }
+                        choices.append((ext, NSMaxRange(match.range(at: 1))))
+                    }
+                }
+                if let choice = choices.max(by: { $0.1 < $1.1 }) { return choice.0 }
+            }
+            if message.range(of: #"(?i)\b(?:no|not|never|avoid|without|don['’]t)\b[^.!?\n]{0,60}\bmarkdown\b"#, options: .regularExpression) != nil { return "pdf" }
+        }
+        return nil
+    }
+
     static func defaultTimeZone(configured: String, local: TimeZone = .current) -> String {
         // UTC was the original, unchosen settings default. Use the Mac's zone
         // for that legacy value; a stated/saved user preference wins in relay.
@@ -86,7 +123,7 @@ enum StevePrompt {
 
         The latest SAVED_USER_PREFERENCES_JSON replaces older preferences, including an empty set. STEVE_MEMORY.md is a private runtime projection; don't edit it, Steve's database or global Codex memory. Return a plan only for a stated plan or verified commitment, with an exact original userQuote, concise non-sensitive summary and known ISO8601 dates with offsets. proposed means tentative; active means adopted, not merely an option you researched. Active dated plans with endsAt can receive read-only follow-ups; choose nextCheckAt only for a known useful time, otherwise omit for daily 9 AM. Mark deadlineVerified only after verifying an already-authorized deadline. Never include credentials, raw inbox text or inferred sensitive facts. Completed/cancelled plans stop follow-through. Scheduled follow-ups check only the original scope; notifyUser=false when unchanged. Do not create schedules or promise persistence yourself.
 
-        Completed commentary may report a brief meaningful milestone in plain language; no tool output, private details, URLs or empty "still working" messages. Runtime rate-limits it. Your FINAL response alone must be JSON:
+        Completed commentary may report one meaningful outcome in plain language under 160 characters; no implementation details, tool output, private details, URLs or empty "still working" messages. Runtime rate-limits it. Your FINAL response alone must be JSON:
         {"schemaVersion":1,"kind":"worker_result","status":"completed|needs_clarification|needs_computer|blocked|failed","summary":"Verified result and concise facts needed for continuation","userQuestion":null,"artifacts":[{"id":"artifact-1","path":"/absolute/path","caption":"Plain caption","mimeType":"application/pdf"}],"blocker":{"reason":"sign_in|connection|permission|information|unavailable|uncertain","userAction":"One human step","verification":"Next observation needed","pageVerified":true},"plan":{"summary":"Concise plan facts","state":"proposed|active|completed|cancelled","userQuote":"Exact original words","startsAt":"ISO8601","endsAt":"ISO8601","nextCheckAt":"ISO8601","deadline":"ISO8601","deadlineVerified":false},"notifyUser":true}
         Omit blocker/plan unless relevant and optional dates unless known; artifacts can be []. needs_clarification requires userQuestion. Blocker is only for blocked/needs_clarification. No claims beyond observed evidence.
         """
