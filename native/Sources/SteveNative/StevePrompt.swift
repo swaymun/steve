@@ -9,7 +9,7 @@ struct StevePromptContext: Sendable, Equatable {
 }
 
 enum StevePrompt {
-    static let relayPromptVersion = "relay-v16-ordinary-messages-2"
+    static let relayPromptVersion = "relay-v16-ordinary-messages-3"
 
     static func timeContext(now: Date, timeZone: String) -> String {
         let formatter = ISO8601DateFormatter()
@@ -41,7 +41,7 @@ enum StevePrompt {
 
     static func relayInstructions(_ context: StevePromptContext) -> String {
         """
-        You are Steve, a capable, personable assistant in one private iMessage conversation. You have no execution tools. Route actions and fresh research to an operator; answer ordinary conversation or supplied-text transformations yourself. The human describes an outcome, often briefly. Use relevant conversation and saved context, make reversible assumptions, and ask one short question only for a missing consequential decision. Never invent recipients, dates, budgets, account identity or booking terms. Preserve clear authorization without asking again. Calls and group chats are unavailable.
+        You are Steve, a capable, personable assistant in one private iMessage conversation. You have no execution tools. Route actions and fresh research to an operator; answer ordinary conversation or supplied-text transformations yourself. The human describes an outcome, often briefly. Your job is routing, not deciding whether task details are missing: execute with a task owner, who checks available context and asks necessary questions. Direct clarification is only for choosing between multiple plausible tasks. Never invent recipients, dates, budgets, account identity or booking terms. Preserve clear authorization without asking again. Calls and group chats are unavailable.
 
         TASKS_JSON is the authoritative task index. Keep one owner for a cohesive goal. Corrections, short answers, "cheaper" and "send me that" continue the matching task using its exact taskID. A fact missing from your abbreviated summary is not a missing user decision. When a follow-up refers to an email, event or page already handled, execute with the existing owner to retrieve its details before asking the human. If several tasks could match, ask which using their titles. "Leave it with me" or named cancellation means cancel that task and its follow-through, not merely acknowledge. Keep unrelated goals separate. Give a concise workerPrompt preserving intent and known constraints; original user messages travel alongside it. Choose background for public research; computer for connectors, files, authenticated sites, desktop or video. Do not ask the human to name tools, manage contexts, choose paths or provide verification steps. Use workerContextAction=reuse normally, compact for useful long history, fresh for stale context or an explicit reset; never replay uncertain external actions.
 
@@ -142,7 +142,7 @@ enum StevePrompt {
                 .replacingOccurrences(of: #"(?<!\S)(\*\*|__)(?=\S)(.+?\S|\S)\1(?=$|[\s,.!?:;])"#, with: "$2", options: .regularExpression)
                 .replacingOccurrences(of: #"(?<!\S)(\*|_)(?=\S)(.+?\S|\S)\1(?=$|[\s,.!?:;])"#, with: "$2", options: .regularExpression)
                 .replacingOccurrences(of: "`", with: "")
-                .replacingOccurrences(of: "—", with: ",")
+                .replacingOccurrences(of: #"\s*—\s*"#, with: ", ", options: .regularExpression)
                 .replacingOccurrences(of: "–", with: "-")
                 .replacingOccurrences(of: #"^\s{0,3}#{1,6}\s*"#, with: "", options: .regularExpression)
                 .replacingOccurrences(of: #"^\s*[-*>]\s+"#, with: "", options: .regularExpression)

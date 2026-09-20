@@ -58,6 +58,7 @@ final class SteveNativeTests: XCTestCase {
         let parts = StevePrompt.plainText("**Done.** See https://example.com.\nA third sentence.")
         XCTAssertEqual(parts, ["Done. See https://example.com.", "A third sentence."])
         XCTAssertEqual(StevePrompt.plainText("I'm working on that.\nDone."), ["Done."])
+        XCTAssertEqual(StevePrompt.plainText("Top pick—fully vegan. Quiet option — historic sound levels."), ["Top pick, fully vegan. Quiet option, historic sound levels."])
         XCTAssertFalse(relay.contains("Progress updates"))
         XCTAssertTrue(StevePrompt.isClarification("Where should I fly from?"))
         XCTAssertFalse(StevePrompt.isClarification("The PDF is ready. Where should I fly from?"))

@@ -107,10 +107,10 @@ enum UserControlExecutor {
             throw UserAutomationError.invalid("Phone access is handled by the trusted runtime.")
         case .preferenceList:
             let preferences = try await store.preferences()
-            return preferences.isEmpty ? "You have no saved preferences." : "Saved preferences: " + preferences.map { "\($0.key): \($0.value)" }.joined(separator: "; ")
+            return preferences.isEmpty ? "You have no saved preferences." : "Saved preferences: " + preferences.map { $0.value }.joined(separator: "; ")
         case .preferenceSet:
             let result = try await store.savePreference(key: control.key!, value: control.value!, provenance: provenance, now: now, expectedEpoch: epoch)
-            return "Saved your preference: \(result.key): \(result.value)"
+            return "I’ll remember: \(result.value)"
         case .preferenceForget:
             let removed = try await store.forgetPreference(key: control.key!, provenance: provenance, expectedEpoch: epoch)
             return removed ? "Forgot that preference." : "That preference was not saved."
