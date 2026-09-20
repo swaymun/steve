@@ -1367,6 +1367,19 @@ final class GatewayLifecycleTests: XCTestCase {
         }
     }
 
+    func testTextOnlyRelayClarificationDeliversWithoutAnotherWorkerTurn() async throws {
+        let blocked = #"{"schemaVersion":1,"kind":"worker_result","status":"needs_clarification","summary":"The website requires human verification.","userQuestion":"Please complete the human-verification step on the Mac."}"#
+        let response = #"{"schemaVersion":1,"kind":"relay_request","action":"clarify","userMessage":"Please complete the human-verification step on the Mac.","workerPrompt":null,"workerContextAction":"reuse"}"#
+        let (store, gateway, messages, codex) = try await setup([relay, blocked, response])
+        await gateway.start(); await gateway.receive(inbound("human-verification"))
+        try await eventually { try await store.queueState("inbound:human-verification") == "completed" }
+        let task = try await store.operatorTasks().first
+        let sent = await messages.sent, turns = await codex.turns
+        XCTAssertEqual(task?.state, .needsClarification)
+        XCTAssertEqual(sent, ["Please complete the human-verification step on the Mac."])
+        XCTAssertEqual(turns, 3)
+    }
+
     func testVerifiedLoginOffersBoundLinkAndPageCompletionContinuesSameTask() async throws {
         let blocked = #"{"schemaVersion":1,"kind":"worker_result","status":"blocked","summary":"Sign in to continue.","blocker":{"reason":"sign_in","userAction":"Sign in on the open page.","verification":"Check the account and cart after sign-in.","pageVerified":true}}"#
         let delivery = #"{"schemaVersion":1,"kind":"delivery_plan","status":"failed","messages":["Sign in to continue."]}"#

@@ -255,9 +255,26 @@ enum AgentEnvelopeParser {
     }
 
     static func deliveryPlan(from text: String) throws -> DeliveryPlanEnvelope {
-        let value = try decode(DeliveryPlanEnvelope.self, from: text)
-        try value.validate()
-        return value
+        do {
+            let value = try decode(DeliveryPlanEnvelope.self, from: text)
+            try value.validate()
+            return value
+        } catch {
+            // A relay may use its intent envelope for a text-only delivery.
+            // Preserve that text without admitting work, controls, or memory writes.
+            guard let relay = try? relayRequest(from: text), relay.memoryUpdates?.isEmpty != false,
+                  let message = relay.userMessage else { throw error }
+            let status: DeliveryStatus
+            switch relay.action {
+            case .reply: status = .complete
+            case .clarify: status = .needsClarification
+            case .refuse: status = .failed
+            case .execute, .control, .cancel: throw error
+            }
+            let value = DeliveryPlanEnvelope(schemaVersion: AgentProtocol.schemaVersion, kind: "delivery_plan", status: status, messages: [message], attachments: [], recovery: nil)
+            try value.validate()
+            return value
+        }
     }
 
     private static func decode<T: Decodable>(_ type: T.Type, from text: String) throws -> T {

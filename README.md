@@ -56,7 +56,7 @@ The commands use the running app's local CLI. A web chat without local Mac tools
 
 ## Install manually
 
-[Download v0.1.5 for Apple silicon](https://github.com/swaymun/steve/releases/download/v0.1.5/Steve-macOS.zip) · [SHA-256 checksum](https://github.com/swaymun/steve/releases/download/v0.1.5/Steve-macOS.zip.sha256) · [Release notes](https://github.com/swaymun/steve/releases/tag/v0.1.5)
+[Download v0.1.6 for Apple silicon](https://github.com/swaymun/steve/releases/download/v0.1.6/Steve-macOS.zip) · [SHA-256 checksum](https://github.com/swaymun/steve/releases/download/v0.1.6/Steve-macOS.zip.sha256) · [Release notes](https://github.com/swaymun/steve/releases/tag/v0.1.6)
 
 Use macOS 14 or later with Codex installed and signed in. The prebuilt app is Developer ID signed and notarized by Apple; no source build is needed. Native Computer Use has its own availability and macOS requirements. The Mac must remain awake, signed in, and running Steve.
 
