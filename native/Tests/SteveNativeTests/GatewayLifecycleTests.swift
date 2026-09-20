@@ -16,6 +16,10 @@ private actor FixturePhoneAccess {
     func issue(for gateway: GatewayCoordinator) async throws -> URL { boundary = try await gateway.phoneAccessBoundary(); return issue() }
     func issue() -> URL { count += 1; return URL(string: "https://fixture.example/#pair=private-phone-fixture")! }
 }
+private actor FixtureCompletion {
+    var finished = false
+    func finish() { finished = true }
+}
 private actor FixtureMessages: GatewayMessages {
     var sent: [String] = []
     var attachmentCaptions: [String] = []
@@ -27,12 +31,18 @@ private actor FixtureMessages: GatewayMessages {
     var failWatch = false
     var failSend = false
     var holdSending = false
+    private var holdUncancellableSend = false
+    private var sendWaiter: CheckedContinuation<Void, Never>?
     var holdWatching = false
     private var watchWaiter: CheckedContinuation<Void, Never>?
     func holdWatcher() { holdWatching = true }
     func releaseWatcher() { holdWatching = false; watchWaiter?.resume(); watchWaiter = nil }
     func holdDelivery() { holdSending = true }
-    func releaseDelivery() { holdSending = false }
+    func holdDeliveryUntilReleased() { holdUncancellableSend = true }
+    func releaseDelivery() {
+        holdSending = false; holdUncancellableSend = false
+        sendWaiter?.resume(); sendWaiter = nil
+    }
     func currentRowID() -> Int64 { 0 }
     func watchMessages(sinceRowID: Int64?) async throws -> AsyncThrowingStream<SteveInboundMessage, Error> {
         watchCount += 1
@@ -48,6 +58,7 @@ private actor FixtureMessages: GatewayMessages {
     func configure(failWatch: Bool = false, failSend: Bool = false) { self.failWatch = failWatch; self.failSend = failSend }
     func sendText(chatGUID: String, recipient: String, text: String, replyTo: String?) async throws {
         startedSends += 1
+        if holdUncancellableSend { await withCheckedContinuation { sendWaiter = $0 } }
         while holdSending { try await Task.sleep(for: .milliseconds(5)) }
         sent.append(text)
         if failSend { throw RPCError(message: "fixture ambiguous send") }
@@ -67,6 +78,10 @@ private actor FixtureCodex: GatewayCodexClient {
     var activeTurns = 0
     var stops = 0
     var holdWorker = false
+    private var holdRelay = false
+    private var relayWaiter: CheckedContinuation<Void, Never>?
+    func holdRelayUntilReleased() { holdRelay = true }
+    func releaseRelay() { holdRelay = false; relayWaiter?.resume(); relayWaiter = nil }
     var approvalMode: String?
     var activeApprovalBinding: (String, String)?
     func requestConcurrentOrdinaryApproval() async -> CodexApprovalDecision? {
@@ -108,6 +123,7 @@ private actor FixtureCodex: GatewayCodexClient {
         defer { activeTurns -= 1 }
         let turnID = UUID().uuidString
         await onTurnStarted(turnID)
+        if holdRelay && turns == 1 { await withCheckedContinuation { relayWaiter = $0 } }
         if let mode = approvalMode, turns == 2, let approvalHandler {
             activeApprovalBinding = (threadID, turnID)
             let request = CodexApprovalRequest(requestID: "rpc-approval", method: "mcpServer/elicitation/request", threadID: mismatchApproval ? "other-thread" : threadID, turnID: turnID, message: "Allow fixture action? https://example.test/auth?token=secret", origin: approvalOrigin, connector: "fixture", tool: "read_record", expiresAt: Date().addingTimeInterval(approvalDuration), mode: mode, isEmptyBrowserOriginForm: emptyBrowserForm, nativeAppName: nativeAppName, connectionSetup: connectionSetup)
@@ -1151,6 +1167,33 @@ final class GatewayLifecycleTests: XCTestCase {
         do { try await gateway.resolveApproval(id: approval.id, decision: .accept); XCTFail("Shutdown accepted an approval") } catch {}
         await messages.releaseWatcher()
         await stopping.value
+    }
+
+    func testStopJoinsUncancellableRelayAndSendEvenAfterInvalidation() async throws {
+        for holdRelay in [true, false] {
+            for invalidateFirst in [false, true] {
+                let reply = #"{"schemaVersion":1,"kind":"relay_request","action":"reply","userMessage":"Done."}"#
+                let (_, gateway, messages, codex) = try await setup([reply])
+                if holdRelay { await codex.holdRelayUntilReleased() }
+                else { await messages.holdDeliveryUntilReleased() }
+                defer { Task { await codex.releaseRelay(); await messages.releaseDelivery() } }
+                await gateway.start(); await gateway.receive(inbound("shutdown-held"))
+                if holdRelay { try await eventually { await codex.activeTurns == 1 } }
+                else { try await eventually { await messages.startedSends == 1 } }
+                if invalidateFirst { await gateway.invalidate(cancelQueued: false) }
+                let oldStops = await codex.stops, completion = FixtureCompletion()
+                let stopping = Task { await gateway.stop(); await completion.finish() }
+                try await eventually { await codex.stops > oldStops }
+                // The continuation intentionally ignores cancellation until released.
+                try await Task.sleep(for: .milliseconds(30))
+                let returnedWhileHeld = await completion.finished
+                XCTAssertFalse(returnedWhileHeld, "relay=\(holdRelay), prior invalidation=\(invalidateFirst)")
+                await codex.releaseRelay(); await messages.releaseDelivery()
+                await stopping.value
+                let active = await codex.activeTurns, finished = await completion.finished
+                XCTAssertEqual(active, 0); XCTAssertTrue(finished)
+            }
+        }
     }
 
     func testRestartDoesNotExecutePersistedApprovalReply() async throws {

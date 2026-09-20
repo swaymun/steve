@@ -92,6 +92,9 @@ actor GatewayCoordinator {
     private var watcherTask: Task<Void, Never>?
     private var workTask: Task<Void, Never>?
     private var senderTask: Task<Void, Never>?
+    // Scheduling slots may be replaced on invalidation; retain every owned
+    // database-using task until it actually finishes so stop can join it.
+    private var inFlightTasks: [UUID: Task<Void, Never>] = [:]
     private struct PrivatePhoneDelivery {
         let message: SteveInboundMessage
         let inboxGUIDs: [String]
@@ -272,6 +275,11 @@ actor GatewayCoordinator {
         watcher?.cancel(); watcherTask = nil
         await watcher?.value
         await invalidate(cancelQueued: false)
+        while !inFlightTasks.isEmpty {
+            let tasks = Array(inFlightTasks.values)
+            for task in tasks { task.cancel() }
+            for task in tasks { await task.value }
+        }
         transportError = "Messages watcher is stopped."
     }
     @discardableResult
@@ -289,6 +297,7 @@ actor GatewayCoordinator {
         takeoverReservation = reservation
         if keepPaused { paused = true }
         cancelApprovals()
+        for task in inFlightTasks.values { task.cancel() }
         privatePhoneDeliveries.removeAll()
         activeWorkers.removeAll()
         let cancelledOperators = Array(operatorRuns.values)
@@ -423,10 +432,13 @@ actor GatewayCoordinator {
             try capturePermit.issue(token, kind: .phone)
             takeover = TakeoverGuard(token: token, epoch: captured, chatGuid: trusted.chatGuid, senderHandle: normalizeHandle(trusted.senderHandle), workspace: workspace, permission: permission.trimmingCharacters(in: CharacterSet(charactersIn: ":")), expiresAt: Date().addingTimeInterval(takeoverLifetime), taskID: expectedBoundary?.taskID, runID: expectedBoundary?.runID)
             takeoverReservation = nil
+            let expiryID = UUID()
             takeoverExpiryTask = Task {
+                defer { self.inFlightTasks.removeValue(forKey: expiryID) }
                 try? await Task.sleep(for: .seconds(takeoverLifetime))
                 if !Task.isCancelled { await self.expirePhoneTakeover(token: token) }
             }
+            inFlightTasks[expiryID] = takeoverExpiryTask
             scheduleDelivery()
             return token
         } catch {
@@ -597,7 +609,9 @@ actor GatewayCoordinator {
         scheduleDelivery()
         guard running, !changingBoundary, workTask == nil else { return }
         let captured = epoch
+        let taskID = UUID()
         workTask = Task {
+            defer { self.inFlightTasks.removeValue(forKey: taskID) }
             var completed = false
             do { try await Task.sleep(for: debounce); try await drain(epoch: captured); completed = true }
             catch { if !(error is CancellationError) { SteveLog.write("Gateway drain failed error=\(error.localizedDescription)") } }
@@ -611,11 +625,14 @@ actor GatewayCoordinator {
                 if completed && self.epoch == captured && hasInbox { scheduleWork() }
             }
         }
+        inFlightTasks[taskID] = workTask
     }
     private func scheduleDelivery() {
         guard running, !changingBoundary, senderTask == nil else { return }
         let captured = epoch
+        let taskID = UUID()
         senderTask = Task {
+            defer { self.inFlightTasks.removeValue(forKey: taskID) }
             var completed = false
             do {
                 while true {
@@ -637,6 +654,7 @@ actor GatewayCoordinator {
                 if completed && self.epoch == captured && (!privatePhoneDeliveries.isEmpty || pending.contains(where: { !paused || $0.isControl })) { scheduleDelivery() }
             }
         }
+        inFlightTasks[taskID] = senderTask
     }
     private func drain(epoch: String) async throws {
         while true {
@@ -668,7 +686,9 @@ actor GatewayCoordinator {
         let chatGuid = first.chatGuid
         let text = inbound.map(\.text).joined(separator: "\n")
         let attachmentPaths = inbound.flatMap(\.attachmentPaths)
-        Task {
+        let acknowledgementID = UUID()
+        inFlightTasks[acknowledgementID] = Task {
+            defer { self.inFlightTasks.removeValue(forKey: acknowledgementID) }
             try? await Task.sleep(for: acknowledgementDelay)
             if !Task.isCancelled { await self.acknowledgeIfPending(first, epoch: epoch) }
         }
@@ -905,7 +925,14 @@ actor GatewayCoordinator {
     }
     private func presentNextPhoneApproval() {
         guard let id = phoneApprovalOrder.first, let approval = approvals[id] else { return }
-        Task { await self.sendApprovalPrompt(approval.snapshot, binding: approval.binding) }
+        scheduleApprovalPrompt(approval.snapshot, binding: approval.binding)
+    }
+    private func scheduleApprovalPrompt(_ approval: PendingApprovalSnapshot, binding: WorkerBinding) {
+        let taskID = UUID()
+        inFlightTasks[taskID] = Task {
+            defer { self.inFlightTasks.removeValue(forKey: taskID) }
+            await self.sendApprovalPrompt(approval, binding: binding)
+        }
     }
     private func cancelApprovals() {
         for id in Array(approvals.keys) { finishApproval(id: id, decision: .cancel) }
@@ -1077,7 +1104,7 @@ actor GatewayCoordinator {
                 }
                 approvals[id] = Approval(snapshot: snapshot, binding: binding, continuation: continuation, expiryTask: expiry, connectionURL: request.connectionSetup?.url)
                 if snapshot.requiresConnectionSetup {
-                    Task { await self.sendApprovalPrompt(snapshot, binding: binding) }
+                    scheduleApprovalPrompt(snapshot, binding: binding)
                 } else {
                     phoneApprovalOrder.append(id)
                     presentNextPhoneApproval()
@@ -1533,10 +1560,13 @@ extension GatewayCoordinator {
                 }
                 if updated.state == .running, let thread = updated.threadID, let turn = activeWorkers[thread]?.turnID {
                     let previous = steeringTasks[id]
+                    let steeringID = UUID()
                     steeringTasks[id] = Task {
+                        defer { self.inFlightTasks.removeValue(forKey: steeringID) }
                         await previous?.value
                         await self.flushFollowUps(taskID: id, runID: updated.runID, epoch: epoch, threadID: thread, turnID: turn)
                     }
+                    inFlightTasks[steeringID] = steeringTasks[id]
                     await steeringTasks[id]?.value
                 }
                 return
@@ -1598,7 +1628,12 @@ extension GatewayCoordinator {
             try check(epoch)
             if task.mode == .computer { computerOwner = task.id }
             let launched = task
-            operatorRuns[task.id] = Task { await self.runOperator(launched, settings: settings, epoch: epoch) }
+            let runningID = UUID()
+            operatorRuns[task.id] = Task {
+                defer { self.inFlightTasks.removeValue(forKey: runningID) }
+                await self.runOperator(launched, settings: settings, epoch: epoch)
+            }
+            inFlightTasks[runningID] = operatorRuns[task.id]
         }
     }
 
