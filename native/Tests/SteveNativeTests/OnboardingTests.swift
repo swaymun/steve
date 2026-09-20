@@ -2,6 +2,17 @@ import XCTest
 @testable import SteveNative
 
 final class OnboardingTests: XCTestCase {
+    func testHistoricalAccountDoesNotDisqualifyOwner() throws {
+        let owner = "owner@example.com"
+        let current = MessagesAccount(address: "agent@example.com", label: "iCloud")
+        let historical = MessagesAccount(address: owner, label: "historical")
+        XCTAssertEqual(try SteveOnboarding.receivingAddress(for: owner, accounts: [current, historical]), current.address)
+        XCTAssertThrowsError(try SteveOnboarding.receivingAddress(for: owner, accounts: [historical, current]))
+        XCTAssertThrowsError(try SteveOnboarding.receivingAddress(for: owner, accounts: [.init(address: "OWNER@example.com", label: nil)]))
+        XCTAssertThrowsError(try SteveOnboarding.receivingAddress(for: owner, accounts: []))
+        XCTAssertThrowsError(try SteveOnboarding.receivingAddress(for: owner, accounts: [.init(address: "", label: nil)]))
+    }
+
     func testOwnerAddressRequiresExactEmailOrInternationalPhone() throws {
         XCTAssertEqual(try SteveOnboarding.ownerAddress(" Owner+agent@Example.com "), "owner+agent@example.com")
         XCTAssertEqual(try SteveOnboarding.ownerAddress("+1 (555) 123-4567"), "+15551234567")

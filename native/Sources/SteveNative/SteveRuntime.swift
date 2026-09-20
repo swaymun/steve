@@ -1491,12 +1491,7 @@ actor SteveRuntime {
     func configureOwner(_ input: String) async throws -> String {
         let address = try SteveOnboarding.ownerAddress(input)
         let accounts = try await messages.discoverAccounts()
-        guard let receiveAddress = accounts.first?.address, !receiveAddress.isEmpty else {
-            throw RPCError(message: "Sign in to Messages on this Mac with the agent's separate account, then try again.")
-        }
-        guard !accounts.contains(where: { normalizeHandle($0.address) == address }) else {
-            throw RPCError(message: "Choose the owner's iMessage address, not this Mac's Messages account. Steve currently requires separate accounts.")
-        }
+        let receiveAddress = try SteveOnboarding.receivingAddress(for: address, accounts: accounts)
         try await gateway.configureOwner(address: address, receiveAddress: receiveAddress)
         return receiveAddress
     }

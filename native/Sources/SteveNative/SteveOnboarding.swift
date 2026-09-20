@@ -19,6 +19,18 @@ struct SteveOwnerSetup: Codable, Equatable, Sendable {
 }
 
 enum SteveOnboarding {
+    static func receivingAddress(for owner: String, accounts: [MessagesAccount]) throws -> String {
+        guard let address = accounts.first?.address, !address.isEmpty else {
+            throw RPCError(message: "Sign in to Messages on this Mac with the agent's separate account, then try again.")
+        }
+        // Discovery prefers the current identity; later entries may be old
+        // accounts retained in chat.db and must not disqualify a separate owner.
+        guard normalizeHandle(address) != owner else {
+            throw RPCError(message: "Choose the owner's iMessage address, not this Mac's Messages account. Steve currently requires separate accounts.")
+        }
+        return address
+    }
+
     static func ownerAddress(_ input: String) throws -> String {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.range(of: #"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$"#, options: .regularExpression) != nil {
