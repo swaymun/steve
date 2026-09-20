@@ -23,14 +23,14 @@ Recreated from real Mac Mini task exchanges on September 19, 2026; messages and 
 
 Email needs a connected account; video needs Steve's Screen Recording permission.
 
+Replies use plain text. Guides, reports, and itineraries are delivered as PDFs for reading in Messages; ask for Markdown or another source format when you want an editable copy.
+
 ```text
 iPhone → iMessage → Steve on your Mac → Codex → apps and websites
        ← results, files, and recordings ←
 ```
 
-**Development preview:** iMessage tasks, browser research, reminders, email reads, and video delivery have been exercised on a Mac. Phone login, iPhone video playback, and account integration coverage have [remaining limitations](guide/preview-limitations.md). MIT licensed.
-
-
+**Development preview:** [Current support and limits](guide/preview-limitations.md). MIT licensed.
 
 **Requires:** an Apple silicon Mac with macOS 14+, Codex, and a **separate Messages account on the Mac running Steve**. Computer Use has its own availability and macOS requirements; see [setup](guide/setup.md). Same-account self-messaging is outside this setup flow.
 
@@ -56,7 +56,7 @@ The commands use the running app's local CLI. A web chat without local Mac tools
 
 ## Install manually
 
-[Download v0.1.3 for Apple silicon](https://github.com/swaymun/steve/releases/download/v0.1.3/Steve-macOS.zip) · [SHA-256 checksum](https://github.com/swaymun/steve/releases/download/v0.1.3/Steve-macOS.zip.sha256) · [Release notes](https://github.com/swaymun/steve/releases/tag/v0.1.3)
+[Download v0.1.4 for Apple silicon](https://github.com/swaymun/steve/releases/download/v0.1.4/Steve-macOS.zip) · [SHA-256 checksum](https://github.com/swaymun/steve/releases/download/v0.1.4/Steve-macOS.zip.sha256) · [Release notes](https://github.com/swaymun/steve/releases/tag/v0.1.4)
 
 Use macOS 14 or later with Codex installed and signed in. The prebuilt app is Developer ID signed and notarized by Apple; no source build is needed. Native Computer Use has its own availability and macOS requirements. The Mac must remain awake, signed in, and running Steve.
 

@@ -196,6 +196,15 @@ final class SteveNativeTests: XCTestCase {
         XCTAssertEqual(parts, ["See https://example.com/report.pdf. Use /Users/fixture/Documents/report.pdf."])
     }
 
+    func testMessageFormattingUnwrapsMarkdownWithoutChangingURLsOrFilenames() {
+        let input = "**Ready.** Read the [guide](https://example.com/guide_(final)).\n*Keep* _this_ __copy__: /Users/fixture/my_file__name.pdf and https://example.com/_private_/a__b."
+        XCTAssertEqual(StevePrompt.plainText("![Chart](https://example.com/chart.png)"), ["Chart (https://example.com/chart.png)"])
+        XCTAssertEqual(StevePrompt.plainText(input), [
+            "Ready. Read the guide (https://example.com/guide_(final)).",
+            "Keep this copy: /Users/fixture/my_file__name.pdf and https://example.com/_private_/a__b."
+        ])
+    }
+
     func testCodexSessionRecoveryRecognizesStaleResumedThreadFailures() {
         XCTAssertTrue(CodexSessionRecovery.shouldReplaceResumedThread(
             for: RPCError(message: "Timed out waiting for Codex turn")

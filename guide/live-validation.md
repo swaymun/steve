@@ -4,11 +4,20 @@ Run unit tests first. These checks then exercise the installed app, actual Mac s
 
 For each scenario, record the installed build identity, start/end time, observed result, artifact verification, and any blocker in a **private** log. A source test, successful process exit, or queued message is not proof of delivery. Do not publish raw conversations, login screens, account identifiers, or unreviewed recordings.
 
+## Validation coverage
+
+Connected email and calendar reads passed live checks with both operator models in v0.1.3. Sending email, changing calendar events, completing reservations, and making purchases were not exercised. Received videos were decoded and reviewed on a Mac, and the user confirmed playback in their Messages chat. Physical iPhone Safari control still needs full device acceptance. These are gaps in test coverage, not confirmed product defects or restrictions on authorized tasks.
+
+Account sign-in problems should be diagnosed separately from Steve's controls. A website's phone-number or verification requirement does not by itself establish a Steve login bug. Keep personal account details in private logs.
+
+## Acceptance scenarios
+
 | Scenario | Action | Required evidence |
 | --- | --- | --- |
 | Setup | Run installed `setup --non-interactive --json`, complete the human steps, and run it again. | Existing choices preserved; accurate missing steps; one running gateway. |
 | Exact pairing | Pair the authorized chat; send an inert status request from an unpaired fixture when separately authorized. | Paired reply received; unpaired chat cannot execute a task. |
 | File delivery | Ask for a new text file containing a unique test marker. | Exact bytes in the Mac workspace and the received iMessage attachment. |
+| Readable documents | Ask for a short guide without specifying a file format, then explicitly request its Markdown source. | First reply uses plain text and delivers a readable PDF with intact content and links; Markdown is sent only for the explicit follow-up. Inspect the actual received files. |
 | Browser approval | Request a public HTTPS page through the installed official tool with site approval set to ask. | Scoped approval reaches the phone; explicit decision resolves once; unsupported prompts cancel without inventing a saved user denial. |
 | Browser result | After approval, read the page heading and return a screenshot. | Fresh visible page evidence, readable received image, existing profile preserved. |
 | Concurrent goals | Start substantial public research, then ask an unrelated question and start a second task. | Two distinct task/thread identities, overlapping work, responsive relay, separate correct deliveries. |
@@ -24,8 +33,8 @@ For each scenario, record the installed build identity, start/end time, observed
 | Reminder | Schedule a short one-time reminder in an explicit timezone. | Exactly one received reminder, durable outcome, and no duplicate after restart. |
 | Recurring task | Schedule a harmless workspace task, miss several intervals, then restart. | One coalesced run, correct next occurrence, real task and delivery result; unresolved outcomes block further runs. |
 | Phone takeover | Open the private link in iPhone Safari, control an inert test form, disconnect, expire, and revoke. | Worker paused before capture/input; no recorded or model-visible typing; end states stay paused unless explicitly resumed. |
-| Task video | Inventory TextEdit windows, select the exact harmless task window, record it without display fallback, and send it. | Only the selected window appears, visible recording indicator, valid H.264 MP4, exact task outcome, received native attachment; actual iPhone playback remains unverified. |
-| Video audio | With separate authorization for full-display and system-audio scope, repeat on an explicitly selected display with a brief known sound and `--audio`. | Audible AAC track in the received clip; no microphone recording; actual iPhone playback remains unverified. |
+| Task video | Inventory TextEdit windows, select the exact harmless task window, record it without display fallback, and send it. | Only the selected window appears, visible recording indicator, valid H.264 MP4, exact task outcome, received native attachment, and playback checked on the receiving device. |
+| Video audio | With separate authorization for full-display and system-audio scope, repeat on an explicitly selected display with a brief known sound and `--audio`. | Audible system sound in the received clip, no microphone recording, and playback checked on the receiving device. |
 | Video privacy | Cancel through the indicator and request phone takeover during a harmless recording. | No incomplete clip delivered; input/capture permit closed; discarded files absent. |
 | Link test request | Review a fictional purchase envelope and use only the supported test-mode adapter. | Exact test amount/items, stable operation identity, no real charge, no credential-bearing output in model/chat/logs. |
 

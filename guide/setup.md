@@ -6,7 +6,7 @@ Use the tested account arrangement: Messages on Steve's Mac is signed in to a se
 
 ## Install a release
 
-The [v0.1.3 development preview](https://github.com/swaymun/steve/releases/tag/v0.1.3) contains a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Native Computer Use has separate availability and macOS requirements; inspect its installed app and supported Codex setup flow. Intel builds have not been validated.
+The [v0.1.4 development preview](https://github.com/swaymun/steve/releases/tag/v0.1.4) contains a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Native Computer Use has separate availability and macOS requirements; inspect its installed app and supported Codex setup flow. Intel builds have not been validated.
 
 ### Discover the right download
 
@@ -14,7 +14,7 @@ Steve is currently distributed as a GitHub prerelease. Use the [published releas
 
 An agent should inspect published, non-draft releases in descending version order and choose the newest compatible one. Check the Mac's architecture and macOS version against the release notes, and require both `Steve-macOS.zip` and `Steve-macOS.zip.sha256` in that same release. GitHub's automatic source ZIP/tar archives are not the app. If no compatible app exists, explain the source-build option rather than claiming there is no release.
 
-For this version: [download the app ZIP](https://github.com/swaymun/steve/releases/download/v0.1.3/Steve-macOS.zip) and [its checksum](https://github.com/swaymun/steve/releases/download/v0.1.3/Steve-macOS.zip.sha256). In the download folder:
+For this version: [download the app ZIP](https://github.com/swaymun/steve/releases/download/v0.1.4/Steve-macOS.zip) and [its checksum](https://github.com/swaymun/steve/releases/download/v0.1.4/Steve-macOS.zip.sha256). In the download folder:
 
 ```sh
 shasum -a 256 -c Steve-macOS.zip.sha256
@@ -205,7 +205,7 @@ steve video cancel --json
 
 Window capture excludes the desktop and other windows, does not include child windows or audio, and cancels if the selected window is resized, hidden, closed, or replaced. Do not guess a window ID or fall back to a wider scope when the requested window is unavailable. Full-display capture requires separate, explicit authorization for everything visible on that display: `steve video start --demonstration --display DISPLAY_ID --seconds 30 --json`. Add `--audio` only when system sound was also explicitly authorized; it is available only with display capture. Microphone recording is not supported. Finish permissions and authentication before recording; cancel before any login, sensitive input, or phone takeover. The visible recording indicator also offers cancellation.
 
-The default delivery budget is 24 MiB, with a maximum recording duration of 120 seconds. These are Steve’s limits, not an Apple-published iMessage attachment limit. Exceeding a limit discards the unfinished clip. Short demonstrations with and without system audio have been received and fully decoded on another Mac; Messages converted the H.264 MP4 to a HEVC MOV and retained the AAC audio. Do not assume the received file has the source codec, extension, or bytes. Actual iPhone playback remains a separate acceptance check. Apple documents inline video attachments in [Messages on Mac](https://support.apple.com/guide/messages/send-images-ichtb967d30b/mac).
+The default delivery budget is 24 MiB, with a maximum recording duration of 120 seconds. These are Steve’s limits, not an Apple-published iMessage attachment limit. Exceeding a limit discards the unfinished clip. Short demonstrations with and without system audio have been received and fully decoded on another Mac; Messages converted the H.264 MP4 to a HEVC MOV and retained the AAC audio. The user also confirmed playback in their Messages chat. Do not assume the received file has the source codec, extension, or bytes. Apple documents inline video attachments in [Messages on Mac](https://support.apple.com/guide/messages/send-images-ichtb967d30b/mac).
 
 ## Saved preferences
 

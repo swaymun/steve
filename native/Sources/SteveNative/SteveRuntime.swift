@@ -969,7 +969,7 @@ actor GatewayCoordinator {
             SteveStore.OutboundPart(id: UUID().uuidString, chatGuid: first.chatGuid, recipient: first.senderHandle, replyTo: first.guid, inboxGUIDs: guids, text: $0, attachmentPath: nil, workspace: workspace, permission: permission, isControl: control)
         }
         parts += attachments.map {
-            SteveStore.OutboundPart(id: UUID().uuidString, chatGuid: first.chatGuid, recipient: first.senderHandle, replyTo: first.guid, inboxGUIDs: guids, text: $0.1, attachmentPath: $0.0, workspace: workspace, permission: permission, isControl: control)
+            SteveStore.OutboundPart(id: UUID().uuidString, chatGuid: first.chatGuid, recipient: first.senderHandle, replyTo: first.guid, inboxGUIDs: guids, text: StevePrompt.plainText($0.1).joined(separator: " "), attachmentPath: $0.0, workspace: workspace, permission: permission, isControl: control)
         }
         try await store.stageDelivery(parts, inboxGUIDs: guids, expectedEpoch: epoch)
         scheduleDelivery()

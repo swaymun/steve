@@ -14,6 +14,7 @@ private actor FixturePhoneAccess {
 }
 private actor FixtureMessages: GatewayMessages {
     var sent: [String] = []
+    var attachmentCaptions: [String] = []
     var startedSends = 0
     var watchCount = 0
     var watchCursors: [Int64?] = []
@@ -47,7 +48,7 @@ private actor FixtureMessages: GatewayMessages {
         sent.append(text)
         if failSend { throw RPCError(message: "fixture ambiguous send") }
     }
-    func sendAttachment(chatGUID: String, recipient: String, path: String, caption: String, replyTo: String?) throws { sent.append(path) }
+    func sendAttachment(chatGUID: String, recipient: String, path: String, caption: String, replyTo: String?) throws { sent.append(path); attachmentCaptions.append(caption) }
 }
 private actor FixtureCodex: GatewayCodexClient {
     var approvalHandler: CodexApprovalHandler?
@@ -84,6 +85,7 @@ private actor FixtureCodex: GatewayCodexClient {
     func failWorkerResume(_ message: String) { workerResumeError = message }
     var results: [String]
     init(_ results: [String]) { self.results = results }
+    func appendResults(_ values: [String]) { results.append(contentsOf: values) }
     func hold() { holdWorker = true }
     func stop() { stops += 1 }
     func startThread(cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool, serviceTier: SteveServiceTier) -> String { let role = isRelay ? "relay" : "worker"; startTiers.append(role + ":" + serviceTier.rawValue); threadInstructions.append((role, developerInstructions)); return UUID().uuidString }
@@ -612,6 +614,24 @@ final class GatewayLifecycleTests: XCTestCase {
         try await eventually { try await store.queueState("inbound:unknown") == "uncertain" }
         let sent = await messages.sent, turns = await codex.turns
         XCTAssertFalse(sent.contains("Success")); XCTAssertEqual(turns, 3)
+    }
+
+    func testDeliveryFormatsBothMessageAndAttachmentCaption() async throws {
+        let (store, gateway, messages, codex) = try await setup([])
+        let settings = try await store.getSettings()
+        let root = try XCTUnwrap(settings?.workspaceRoot)
+        let file = URL(fileURLWithPath: root).appendingPathComponent("guide.pdf")
+        try Data("fixture attachment".utf8).write(to: file)
+        let result = WorkerResultEnvelope(schemaVersion: 1, kind: "worker_result", status: .completed,
+            summary: "Saved guide", userQuestion: nil,
+            artifacts: [.init(id: "guide", path: file.path, caption: "**Your guide**", mimeType: "application/pdf")])
+        let plan = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["**Ready.** See [source](https://example.com)."],"attachments":[{"artifactID":"guide","caption":"**Guide** with _steps_ and [source](https://example.com)."}]}"#
+        try await codex.appendResults([relay, String(decoding: JSONEncoder().encode(result), as: UTF8.self), plan])
+        await gateway.start(); await gateway.receive(inbound("readable-guide"))
+        try await eventually { try await store.queueState("inbound:readable-guide") == "completed" }
+        let sent = await messages.sent, captions = await messages.attachmentCaptions
+        XCTAssertEqual(sent, ["Ready. See source (https://example.com).", file.path])
+        XCTAssertEqual(captions, ["Guide with steps and source (https://example.com)."])
     }
     func testNativeCaptureRequiresExplicitSelectionAndCurrentTurnEvidence() async throws {
         let (store, gateway, _, _) = try await setup([])

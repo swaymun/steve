@@ -1,13 +1,12 @@
-# Development preview limitations
+# Current support and limits
 
-Steve's core iMessage flow, native browser tasks, reminders, connected email reads, file delivery, and document-window recordings have been exercised on a Mac. The following features still need verification or have narrower support:
+Steve supports iMessage tasks, concurrent research, native browser and app use, reminders, connected email and calendar reads, and file, screenshot, and video delivery. See [setup](setup.md) for supported hardware, account requirements, and permissions.
 
-- **Messages accounts:** the tested arrangement uses a separate Messages account on Steve's Mac. Same-account self-messaging is not supported by the setup flow.
-- **Phone login and control:** completing a website login through the private Tailscale page on a physical iPhone has not passed full acceptance. This feature is optional.
-- **Video:** received recordings have been decoded and reviewed on a Mac. Playback on a physical iPhone remains unverified. Closing the recorded window cancels the active capture; a delivered clip may show the final state without the full editing sequence. Small text may be difficult to read.
-- **Connected accounts:** email reads, calendar discovery, and event searches have been exercised through authorized connectors. Coverage depends on the connected account and its scopes. An empty response for one calendar does not establish that every calendar is clear. Sending email and changing calendar events were outside this release's live acceptance checks.
-- **Concurrent work:** background research can overlap, but visible Mac and browser tasks run one at a time. Native research helpers depend on compatible Codex support; an operator continues alone when helpers are unavailable. Restarted operations with uncertain effects require review and are not replayed automatically.
-- **Payments:** the optional Stripe Link adapter has deterministic fixture coverage only. It is not connected to the operator or onboarding and cannot currently make a purchase.
-- **Compatibility:** the downloadable app is verified on Apple silicon. Intel source builds have not been validated. Steve requires a signed-in, awake Mac session; native Computer Use has separate availability and OS requirements.
+The current implementation has these limits:
 
-Steve's optional Screen Recording and Accessibility grants are separate from the Computer Use app's grants. Installing an app or finding its executable does not prove its permissions work. Finish [onboarding](setup.md) with a real browser task and an observed iMessage reply.
+- **One paired conversation:** Steve accepts tasks from one paired direct chat. Group chats and messages sent by Steve's own Messages account are ignored, so use a separate Messages account on Steve's Mac.
+- **One visible Mac at a time:** research tasks can overlap, but operators take turns controlling the shared desktop and browser. Native helpers handle public research only and require compatible Codex support; operators work alone when helpers are unavailable.
+- **Short recordings:** video has a 120-second maximum and a default 24 MiB delivery budget. Resizing, hiding, or closing the selected window cancels its recording. System audio is available with explicitly requested display recording; microphone recording is unavailable. See [video setup](setup.md#video-evidence).
+- **No integrated Stripe Link payments:** the repository's test adapter is not connected to the app. This does not restrict ordinary browser shopping; purchases still require the user's authorization.
+
+Physical-device checks and workflows not exercised during release testing are tracked in [live validation](live-validation.md#validation-coverage). An untested workflow is not necessarily unsupported or broken.
