@@ -97,4 +97,14 @@ final class ServiceTierTests: XCTestCase {
         XCTAssertThrowsError(try CodexAppServerClient.verifyServiceTier(["serviceTier": "default"], requested: .fast))
         XCTAssertThrowsError(try CodexAppServerClient.verifyServiceTier(["serviceTier": "priority"], requested: .standard))
     }
+    func testSavedUserTimezoneOverridesMacAndPreservesDaylightRules() {
+        let provenance = ExplicitUserProvenance(source: .pairedMessage, sourceID: "zone", statement: "My timezone is PST", explicitlyRequested: true, recordedAt: Date())
+        let preference = ExplicitPreference(key: "timezone", value: "PST", provenance: provenance, createdAt: Date(), updatedAt: Date())
+        let zone = StevePrompt.userTimeZone(preferences: [preference], configured: "America/New_York")
+        XCTAssertEqual(zone, "America/Los_Angeles")
+        let date = ISO8601DateFormatter().date(from: "2026-09-20T12:00:00Z")!
+        XCTAssertEqual(TimeZone(identifier: zone)?.abbreviation(for: date), "PDT")
+        XCTAssertEqual(StevePrompt.userTimeZone(preferences: [], configured: "America/New_York"), "America/New_York")
+    }
+
 }

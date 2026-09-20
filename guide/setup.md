@@ -184,13 +184,13 @@ steve phone --disconnect --json
 
 Once phone access is configured, ask Steve in the paired iMessage conversation for a phone-control link. If Steve is paused, first say "resume", then ask for the link. Steve sends a private, one-use Safari link that expires after two minutes. The link is not included in model inputs or Steve's SQLite outbox; it remains in your private Messages history. Requesting a link does not grant control or pause the worker; claiming it does. If delivery is uncertain or the link expires, ask for a new one.
 
-For a login, first ask Steve to open the site's sign-in page. After it confirms the page is ready, ask for a phone link, open it in Safari with Tailscale connected, and tap **Take control**. You are operating the same browser session on the Mac, so your successful login remains available there. Tailscale supplies the private network connection behind the URL; it is required on the phone even though the interface is a web page.
+For a login, ask Steve to open the site's sign-in page. When the operator verifies that page and phone access is configured, Steve automatically offers the private link. Open it in Safari with Tailscale connected and tap **Take control**. The verified login briefly reserves computer control so another task cannot replace the page. You are operating the same browser session on the Mac, so your successful login remains available there. Tailscale supplies the private network connection behind the URL; it is required on the phone even though the interface is a web page.
 
 The setup command uses an unused HTTPS port (8443 or 10000), preserves other Serve routes, and refuses a conflicting or publicly exposed Funnel route. Tailscale may require enabling HTTPS in your account before setup succeeds. The backend listens only on loopback. The link contains a short-lived secret: keep it private. You can also show a QR code from Steve’s connected-phone menu.
 
 Steve needs its own Screen Recording and Accessibility grants for this feature. The separate Computer Use app’s grants do not apply to Steve. Open an existing Chrome window before pairing. Safari shares the display containing that window, including other visible apps and password-manager popups. Inputs and live images are not written into the model conversation or recording artifacts.
 
-Taking control pauses and drains the worker. Disconnect, expiry, revocation, and system lock leave it paused. Finishing can resume queued requests; an interrupted action is never automatically replayed. Send a new message to continue an interrupted task. Real iPhone Safari login, keyboard, and lock behavior remain release acceptance checks.
+Taking control pauses and drains the worker. Disconnect, expiry, revocation, and system lock leave it paused. After completing the verified login, tap **Done — continue** or send an ordinary signed-in reply to resume verification in the same task. An interrupted action is never automatically replayed, and an expired or disconnected session remains paused until you explicitly continue. Real iPhone Safari login, keyboard, and lock behavior remain release acceptance checks.
 
 ## Video evidence
 
@@ -209,13 +209,17 @@ The default delivery budget is 24 MiB, with a maximum recording duration of 120 
 
 ## Saved preferences
 
-Ask Steve to remember, list, or forget a preference. Forget removes the active saved preference from Steve; it does not erase earlier iMessages or Codex conversation history. Saved preferences do not authorize purchases, account changes, or other actions.
+Clearly stated lasting preferences can be saved alongside an ordinary task; you can also ask Steve to remember, list, change, or forget one directly. Steve projects active preferences and adopted plans into a private `STEVE_MEMORY.md` inside the configured workspace. It creates the file with restricted permissions, refuses symlinks or an existing user-owned/tracked file, and adds a verified Git exclusion. Keep the file private. The durable database remains authoritative, so do not edit the projection directly.
+
+Forget removes the active saved preference from Steve; it does not erase earlier iMessages or Codex conversation history. Preferences and plan context never authorize purchases, account changes, messages, bookings, or other actions.
 
 ## Reminders and scheduled tasks
 
 Ask normally: “Remind me in two minutes to check the oven.” For a clock time, Steve uses your requested timezone, a saved timezone preference, or the Mac’s local timezone and shows the date-correct abbreviation (for example, EST/EDT or PST/PDT) in the confirmation. The original unset UTC default falls back to the Mac’s zone; explicit non-UTC settings are preserved. If needed, say “Remember that my timezone is Eastern time.” You can also ask Steve to list or cancel schedules in normal language. The Mac and Steve must be running for execution; after downtime, missed recurring occurrences are coalesced instead of replaying every missed run.
 
 Schedules remain bound to the paired chat, workspace, and permission choices. An uncertain task or delivery outcome blocks later automatic occurrences until reviewed. Live checks verified a one-time reminder across restart and a recurring reminder paused across restart with zero executions. Daylight-saving transitions still need separate installed-device acceptance.
+
+Steve can adopt a dated plan from an ordinary request and perform read-only follow-ups at a known meaningful next-check time, then daily at 9:00 AM in the plan's timezone. Follow-ups stay quiet from 10:00 PM through 8:00 AM unless a verified deadline falls before morning; an explicit reminder time is unchanged. Steve sends only a verified meaningful change, deadline, blocker, or decision. Taking the plan back yourself, cancelling its task, expiration, or an uncertain outcome stops later automatic checks.
 
 ## MCP integrations
 

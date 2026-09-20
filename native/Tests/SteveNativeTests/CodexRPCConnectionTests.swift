@@ -2,6 +2,12 @@ import Foundation
 import XCTest
 @testable import SteveNative
 
+private actor TurnProgressRecorder {
+    private var events: [CodexTurnEvent] = []
+    func append(_ event: CodexTurnEvent) { events.append(event) }
+    func recorded() -> [CodexTurnEvent] { events }
+}
+
 final class CodexRPCConnectionTests: XCTestCase {
     func testConnectionSetupRequiresOfficialTypedMetadataAndTrustedURLs() throws {
         var params: [String: Any] = ["mode": "url", "serverName": "codex_apps", "url": "https://chatgpt.com/auth?token=secret", "_meta": ["_codex_apps": ["connector_auth_failure": ["is_auth_failure": true, "connector_id": "calendar", "connector_name": "Google Calendar", "install_url": "https://chatgpt.com/plugins?token=secret"]]]]
@@ -332,6 +338,23 @@ final class CodexRPCConnectionTests: XCTestCase {
         _ = try await rpc.waitForTurn(threadID: "t", turnID: "u")
         let response = try rpc.requestWhileStreaming(method: "turn/interrupt") as? [String: Bool]
         XCTAssertEqual(response?["acknowledged"], true)
+    }
+
+    func testTurnProgressReportsOnlyCompletedCommentary() async throws {
+        let rpc = connection(#"""
+        read -r first
+        printf '%s\n' '{"id":1,"result":{}}' '{"method":"item/agentMessage/delta","params":{"threadId":"t","turnId":"u","itemId":"commentary","delta":"Working"}}' '{"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"id":"tool","type":"commandExecution","status":"completed"}}}' '{"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"id":"commentary","type":"agentMessage","phase":"commentary","text":"Working safely."}}}' '{"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"id":"final","type":"agentMessage","phase":"final_answer","text":"Done."}}}' '{"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed"}}}'
+        read -r hold
+        """#)
+        defer { rpc.stop() }
+        _ = try rpc.request(method: "fixture")
+        let recorder = TurnProgressRecorder()
+        let result = try await rpc.waitForTurn(threadID: "t", turnID: "u") { event in
+            await recorder.append(event)
+        }
+        let events = await recorder.recorded()
+        XCTAssertEqual(events, [.init(phase: .commentary, text: "Working safely.")])
+        XCTAssertEqual(result.text, "Done.")
     }
 
     func testCancellingOneWaitWakesItWithoutStoppingAnotherTurn() async throws {

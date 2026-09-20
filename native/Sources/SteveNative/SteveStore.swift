@@ -297,6 +297,8 @@ actor SteveStore {
         let workspace: String?
         let permission: String?
         var isControl: Bool = false
+        var notBefore: Date? = nil
+        var followUpRunID: String? = nil
     }
 
     func phoneAccessOrigin() throws -> String? { try getJSON(String.self, key: "phone_access_origin") }
@@ -388,11 +390,16 @@ actor SteveStore {
         }
     }
 
-    func pendingOutbox() throws -> [OutboundPart] {
+    func pendingOutbox(now: Date = Date()) throws -> [OutboundPart] {
         let values = try queuePayloads(OutboundPart.self, direction: "outbound", state: "pending")
         let uncertain = try queuePayloads(OutboundPart.self, direction: "outbound", state: "uncertain")
         let blocked = Set(uncertain.flatMap(\.inboxGUIDs))
-        return values.filter { blocked.isDisjoint(with: $0.inboxGUIDs) }
+        return values.filter { blocked.isDisjoint(with: $0.inboxGUIDs) && ($0.notBefore == nil || $0.notBefore! <= now) }
+    }
+
+    func deferOutboundPart(_ part: OutboundPart, until: Date) throws {
+        var deferred = part; deferred.notBefore = until
+        try connection.run("UPDATE queue SET payload_json = ?, updated_at = ? WHERE id = ? AND state = 'pending'", String(decoding: try encoder.encode(deferred), as: UTF8.self), Self.dateFormatter.string(from: Date()), part.id)
     }
 
     func beginSending(_ id: String) throws -> Bool {

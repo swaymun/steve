@@ -245,4 +245,21 @@ final class OperatorConcurrencyTests: XCTestCase {
         XCTAssertEqual(starts.count, 1, "The existing computer owner must still block this task")
     }
 
+    func testLegacyTaskOriginalWordsSurviveFreshFollowUp() async throws {
+        let (store, gateway, _, codex) = try await fixture()
+        await gateway.start()
+        let settings = try await store.getSettings()!
+        let original = message("Only vegetarian, never book it")
+        let old = OperatorTaskRecord(id: "legacy", chatGuid: "chat", senderHandle: original.senderHandle, workspace: settings.workspaceRoot!, permission: "workspace-write", title: "Dinner", objective: "Find dinner", mode: .background, state: .completed, inbound: [original], runID: "old-run")
+        try await store.saveOperatorTask(old, expectedEpoch: try await store.gatewayEpoch()!)
+        try await codex.enqueue(.init(action: .execute, workerPrompt: "Cheaper options", workerContextAction: .fresh, taskID: "legacy"))
+        await gateway.receive(message("Actually, cheaper."))
+        try await eventually { await codex.inputs.count == 1 }
+        let inputs = await codex.inputs
+        XCTAssertTrue(inputs[0].contains("Only vegetarian, never book it"))
+        XCTAssertTrue(inputs[0].contains("Actually, cheaper."))
+        let saved = try await store.operatorTask(id: "legacy")
+        XCTAssertEqual(saved?.originalMessages?.count, 2)
+    }
+
 }

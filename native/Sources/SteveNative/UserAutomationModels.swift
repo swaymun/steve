@@ -193,6 +193,7 @@ struct UserSchedule: Codable, Equatable, Sendable {
     let createdAt: Date
     var updatedAt: Date
     var lastChangeProvenance: ExplicitUserProvenance? = nil
+    var followUp: FollowUpPolicy? = nil
 }
 
 enum UserScheduleRunState: String, Codable, Sendable {
@@ -215,4 +216,5 @@ struct UserScheduleRun: Codable, Equatable, Sendable {
     var finishedAt: Date?
     var executionOutcome: UserScheduleRunState? = nil
     var resolutionProvenance: ExplicitUserProvenance? = nil
+    var followUp: FollowUpPolicy? = nil
 }

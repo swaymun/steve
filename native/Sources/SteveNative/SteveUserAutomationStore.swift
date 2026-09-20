@@ -1,5 +1,6 @@
 import Foundation
 import SQLite
+import CryptoKit
 
 /// This actor only persists explicit user data and claims work. It never sends
 /// Messages or executes a scheduled action. Open it on the existing protected
@@ -18,6 +19,7 @@ actor SteveUserAutomationStore {
 
     static func migrate(_ connection: Connection) throws {
         try connection.execute("""
+            CREATE TABLE IF NOT EXISTS task_plans (task_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS explicit_preferences (
                 key TEXT PRIMARY KEY, payload_json TEXT NOT NULL
             );
@@ -33,6 +35,76 @@ actor SteveUserAutomationStore {
             );
             CREATE INDEX IF NOT EXISTS user_schedule_runs_pending ON user_schedule_runs(schedule_id, state);
             """)
+    }
+
+    func plans(authorization: ScheduleAuthorization) throws -> [StevePlanRecord] {
+        try connection.prepare("SELECT payload_json FROM task_plans ORDER BY task_id")
+            .map { try decode(StevePlanRecord.self, raw: $0[0]) }.filter { $0.authorization == authorization }
+    }
+
+    func projectMemory(workspace: String, authorization: ScheduleAuthorization) throws {
+        guard URL(fileURLWithPath: workspace).standardizedFileURL.resolvingSymlinksInPath().path == authorization.workspace else { throw UserAutomationError.boundaryChanged }
+        try SteveWorkspaceMemory.write(workspace: workspace, preferences: preferences(), plans: plans(authorization: authorization))
+    }
+
+    func savePlan(taskID: String, update: WorkerPlanUpdate, authorization: ScheduleAuthorization, provenance: ExplicitUserProvenance, timeZone: String, now: Date, expectedEpoch: String) throws {
+        try update.validate(); try provenance.validate(); try authorization.validate()
+        guard TimeZone(identifier: timeZone) != nil else { throw UserAutomationError.invalid("A plan requires a valid timezone.") }
+        guard provenance.statement.contains(update.userQuote) else { throw UserAutomationError.invalid("Plan scope needs the original user's words.") }
+        try connection.transaction(.immediate) {
+            try checkEpoch(expectedEpoch)
+            let old = try optional(StevePlanRecord.self, sql: "SELECT payload_json FROM task_plans WHERE task_id = ?", argument: taskID)
+            guard old == nil || old?.authorization == authorization else { throw UserAutomationError.boundaryChanged }
+            // Late results cannot resurrect a plan the user handed back.
+            if old?.update.state == .cancelled { return }
+            if old?.update == update && old?.provenance.sourceID == provenance.sourceID { return }
+            if let id = old?.scheduleID, var schedule = try schedule(id: id) {
+                schedule.state = .cancelled; schedule.nextRunAt = nil; schedule.revision += 1
+                try writeSchedule(schedule)
+            }
+            var value = StevePlanRecord(taskID: taskID, update: update, authorization: authorization, provenance: provenance, updatedAt: now, scheduleID: nil, lastNotification: old?.lastNotification)
+            if update.state == .active, let end = WorkerPlanUpdate.date(update.endsAt), end > now {
+                let rule: UserScheduleRule = .calendar(hour: 9, minute: 0, weekdays: [])
+                let next = try WorkerPlanUpdate.date(update.nextCheckAt).flatMap { $0 > now ? $0 : nil } ?? rule.firstOccurrence(now: now, timeZone: timeZone)
+                if next < end {
+                    let policy = FollowUpPolicy(taskID: taskID, expiresAt: end, verifiedDeadline: update.deadlineVerified == true ? WorkerPlanUpdate.date(update.deadline) : nil)
+                    let prompt = "Check this adopted plan using authorized read-only sources. Notify only of a verified meaningful change, deadline, blocker or needed decision; otherwise return notifyUser=false. Do not send, book, buy or change accounts. Plan: " + update.summary
+                    let schedule = UserSchedule(id: UUID().uuidString, creationRequestID: "plan:" + taskID + ":" + UUID().uuidString, name: "Follow up: " + String(update.summary.prefix(120)), prompt: prompt, kind: .task, rule: rule, timeZone: timeZone, authorization: authorization, provenance: provenance, state: .active, revision: 1, nextRunAt: next, createdAt: now, updatedAt: now, followUp: policy)
+                    try insertSchedule(schedule); value.scheduleID = schedule.id
+                }
+            }
+            try connection.run("INSERT INTO task_plans(task_id, payload_json) VALUES (?, ?) ON CONFLICT(task_id) DO UPDATE SET payload_json = excluded.payload_json", taskID, try encode(value))
+        }
+    }
+
+    func cancelPlan(taskID: String, provenance: ExplicitUserProvenance, now: Date, expectedEpoch: String) throws {
+        try provenance.validate()
+        try connection.transaction(.immediate) {
+            try checkEpoch(expectedEpoch)
+            guard var value = try optional(StevePlanRecord.self, sql: "SELECT payload_json FROM task_plans WHERE task_id = ?", argument: taskID) else { return }
+            value.update = WorkerPlanUpdate(summary: value.update.summary, state: .cancelled, userQuote: provenance.statement)
+            value.provenance = provenance; value.updatedAt = now
+            if let id = value.scheduleID, var schedule = try schedule(id: id) {
+                schedule.state = .cancelled; schedule.nextRunAt = nil; schedule.revision += 1
+                try writeSchedule(schedule)
+            }
+            try connection.run("UPDATE task_plans SET payload_json = ? WHERE task_id = ?", try encode(value), taskID)
+        }
+    }
+
+    /// Reserve once before staging, so a crash cannot send the same finding twice.
+    func reservePlanNotification(taskID: String, summary: String, expectedEpoch: String) throws -> Bool {
+        var reserved = false
+        try connection.transaction(.immediate) {
+            try checkEpoch(expectedEpoch)
+            guard var plan = try optional(StevePlanRecord.self, sql: "SELECT payload_json FROM task_plans WHERE task_id = ?", argument: taskID), plan.update.state == .active else { return }
+            let digest = SHA256.hash(data: Data(summary.trimmingCharacters(in: .whitespacesAndNewlines).utf8)).map { String(format: "%02x", $0) }.joined()
+            guard plan.lastNotification != digest else { return }
+            plan.lastNotification = digest
+            try connection.run("UPDATE task_plans SET payload_json = ? WHERE task_id = ?", try encode(plan), taskID)
+            reserved = true
+        }
+        return reserved
     }
 
     func preferences() throws -> [ExplicitPreference] {
@@ -175,11 +247,31 @@ actor SteveUserAutomationStore {
                     try writeSchedule(schedule)
                     continue
                 }
+                if let policy = schedule.followUp {
+                    if now >= policy.expiresAt {
+                        schedule.state = .exhausted; schedule.nextRunAt = nil; schedule.updatedAt = now
+                        try writeSchedule(schedule); continue
+                    }
+                    if let morning = policy.deferredUntil(now: now, timeZone: schedule.timeZone) {
+                        schedule.nextRunAt = morning; try writeSchedule(schedule); continue
+                    }
+                }
                 let outstanding = try connection.scalar("SELECT COUNT(*) FROM user_schedule_runs WHERE schedule_id = ? AND state IN ('claimed', 'enqueued', 'uncertain')", schedule.id) as? Int64 ?? 0
                 guard outstanding == 0, let next = schedule.nextRunAt else { continue }
-                let occurrence = try schedule.rule.coalescedOccurrence(next: next, now: now, timeZone: schedule.timeZone)
+                let occurrence: (due: Date, next: Date?)
+                if let policy = schedule.followUp {
+                    // A known check or quiet-hours deferral need not fall at 9 AM.
+                    // After it, at most one fallback check on the next local day.
+                    var calendar = Calendar(identifier: .gregorian)
+                    calendar.timeZone = TimeZone(identifier: schedule.timeZone)!
+                    let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now))!
+                    let future = try schedule.rule.firstOccurrence(now: tomorrow, timeZone: schedule.timeZone)
+                    occurrence = (next, future < policy.expiresAt ? future : nil)
+                } else {
+                    occurrence = try schedule.rule.coalescedOccurrence(next: next, now: now, timeZone: schedule.timeZone)
+                }
                 let key = String(Int64((occurrence.due.timeIntervalSince1970 * 1000).rounded(.down)))
-                let run = UserScheduleRun(id: UUID().uuidString, scheduleID: schedule.id, scheduleRevision: schedule.revision, scheduledAt: occurrence.due, claimedAt: now, dispatchEpoch: dispatchEpoch, authorization: authorization, kind: schedule.kind, prompt: schedule.prompt, state: .claimed, downstreamID: nil, outcomeDetail: nil, finishedAt: nil)
+                let run = UserScheduleRun(id: UUID().uuidString, scheduleID: schedule.id, scheduleRevision: schedule.revision, scheduledAt: occurrence.due, claimedAt: now, dispatchEpoch: dispatchEpoch, authorization: authorization, kind: schedule.kind, prompt: schedule.prompt, state: .claimed, downstreamID: nil, outcomeDetail: nil, finishedAt: nil, followUp: schedule.followUp)
                 try connection.run("INSERT OR IGNORE INTO user_schedule_runs(id, schedule_id, occurrence_key, state, payload_json) VALUES (?, ?, ?, 'claimed', ?)", run.id, schedule.id, key, try encode(run))
                 let inserted = connection.changes == 1
                 schedule.nextRunAt = occurrence.next
@@ -201,6 +293,14 @@ actor SteveUserAutomationStore {
                 try writeSchedule(value)
             }
         }
+    }
+
+    func validateFollowUpDelivery(id: String, authorization: ScheduleAuthorization, now: Date) throws -> Bool {
+        guard let run = try run(id: id), run.authorization == authorization, run.state != .cancelled,
+              let policy = run.followUp, now < policy.expiresAt,
+              let schedule = try schedule(id: run.scheduleID), schedule.revision == run.scheduleRevision,
+              schedule.authorization == authorization, [.active, .exhausted].contains(schedule.state) else { return false }
+        return true
     }
 
     func validateEnqueued(id: String, authorization: ScheduleAuthorization) throws -> Bool {

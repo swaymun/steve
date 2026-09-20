@@ -35,6 +35,12 @@ struct OperatorTaskRecord: Codable, Sendable, Equatable, Identifiable {
     var scheduledRunID: String?
     var contextAction: WorkerContextAction = .reuse
     var pendingFollowUps: [OperatorFollowUp]?
+    var originalMessages: [SteveInboundMessage]? = nil
+    var handoff: TaskHandoff? = nil
+    var acknowledgementSentAt: Date? = nil
+    var lastProgressAt: Date? = nil
+    var lastProgress: String? = nil
+    var recoveryAttempts: Int? = nil
     var createdAt = Date()
     var updatedAt = Date()
 
@@ -48,11 +54,13 @@ struct OperatorTaskSummary: Codable, Sendable, Equatable {
     let summary: String
     let lastMessageGUID: String?
     let mode: OperatorMode
+    var blocker: WorkerBlocker? = nil
 
     init(_ task: OperatorTaskRecord) {
         id = task.id; title = task.title; state = task.state
         summary = String(task.summary.prefix(1800)); lastMessageGUID = task.inbound.last?.guid
         mode = task.mode
+        blocker = task.handoff?.blocker ?? task.result?.blocker
     }
 }
 

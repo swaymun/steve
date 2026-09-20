@@ -32,6 +32,8 @@ struct PhoneAccessBoundary: Sendable, Equatable {
     let senderHandle: String
     let workspace: String
     let permission: String
+    var taskID: String? = nil
+    var runID: String? = nil
 }
 
 protocol GatewayMessages: Sendable {
@@ -49,6 +51,7 @@ protocol GatewayCodexClient: Sendable {
     func resumeThread(threadID: String, cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool, serviceTier: SteveServiceTier) async throws
     func compactThread(threadID: String) async throws
     func runTurn(threadID: String, text: String, attachmentPaths: [String], workspace: String?, model: String, effort: String, serviceTier: SteveServiceTier, onTurnStarted: @escaping @Sendable (String) async -> Void) async throws -> CodexTurnResult
+    func runTurn(threadID: String, text: String, attachmentPaths: [String], workspace: String?, model: String, effort: String, serviceTier: SteveServiceTier, onProgress: (@Sendable (CodexTurnEvent) async -> Void)?, onTurnStarted: @escaping @Sendable (String) async -> Void) async throws -> CodexTurnResult
     func interruptTurn(threadID: String, turnID: String) async throws
     func steerTurn(threadID: String, expectedTurnID: String, text: String, attachmentPaths: [String]) async throws
     func operatorThread(threadID: String?, cwd: String, permissionProfile: String, profile: AgentModelProfile, instructions: String, mode: OperatorMode, maxHelpers: Int) async throws -> String
@@ -57,6 +60,9 @@ protocol GatewayCodexClient: Sendable {
     func relayProfile(settings: Settings) async throws -> AgentModelProfile
 }
 extension GatewayCodexClient {
+    func runTurn(threadID: String, text: String, attachmentPaths: [String], workspace: String?, model: String, effort: String, serviceTier: SteveServiceTier, onProgress: (@Sendable (CodexTurnEvent) async -> Void)?, onTurnStarted: @escaping @Sendable (String) async -> Void) async throws -> CodexTurnResult {
+        try await runTurn(threadID: threadID, text: text, attachmentPaths: attachmentPaths, workspace: workspace, model: model, effort: effort, serviceTier: serviceTier, onTurnStarted: onTurnStarted)
+    }
     func steerTurn(threadID: String, expectedTurnID: String, text: String, attachmentPaths: [String]) async throws { throw RPCError(message: "Active task steering is unavailable") }
     func operatorThread(threadID: String?, cwd: String, permissionProfile: String, profile: AgentModelProfile, instructions: String, mode: OperatorMode, maxHelpers: Int) async throws -> String {
         if let threadID { try await resumeThread(threadID: threadID, cwd: cwd, permissionProfile: permissionProfile, model: profile.model, developerInstructions: instructions, isRelay: false, serviceTier: profile.serviceTier); return threadID }
@@ -74,6 +80,8 @@ actor GatewayCoordinator {
     private let codex: any GatewayCodexClient
     private let debounce: Duration
     private let retryDelay: Duration
+    private let acknowledgementDelay: Duration
+    private var acknowledgedMessages = Set<String>()
     private let takeoverLifetime: TimeInterval
     private let automation: SteveUserAutomationStore?
     private let schedulerInterval: Duration
@@ -89,7 +97,10 @@ actor GatewayCoordinator {
         let url: URL
         let epoch: String
         let expiresAt: Date
+        var taskID: String? = nil
+        var runID: String? = nil
     }
+    private var issuingPhoneTask: (id: String, runID: String)?
     private var privatePhoneDeliveries: [PrivatePhoneDelivery] = []
     private var phoneAccessHandler: (@Sendable () async throws -> URL)?
     func setPhoneAccessHandler(_ handler: @escaping @Sendable () async throws -> URL) { phoneAccessHandler = handler }
@@ -120,6 +131,8 @@ actor GatewayCoordinator {
         let workspace: String
         let permission: String
         let expiresAt: Date
+        var taskID: String? = nil
+        var runID: String? = nil
     }
     private var takeover: TakeoverGuard?
     private var takeoverReservation: String?
@@ -127,6 +140,7 @@ actor GatewayCoordinator {
     private var activeWorkers: [String: WorkerBinding] = [:]
     private var operatorRuns: [String: Task<Void, Never>] = [:]
     private var computerOwner: String?
+    private var loginReservation: (taskID: String, runID: String, expiresAt: Date)?
     private var steeringTasks: [String: Task<Void, Never>] = [:]
     private var approvals: [String: Approval] = [:]
     private var phoneApprovalOrder: [String] = []
@@ -136,10 +150,11 @@ actor GatewayCoordinator {
     private var pauseTransitionInProgress = false
     private(set) var transportError: String? = "Messages watcher has not started."
 
-    init(store: SteveStore, messages: any GatewayMessages, codex: any GatewayCodexClient, debounce: Duration = .milliseconds(1500), retryDelay: Duration = .seconds(5), takeoverLifetime: TimeInterval = 600, automation: SteveUserAutomationStore? = nil, schedulerInterval: Duration = .seconds(1), clockNow: @escaping @Sendable () -> Date = { Date() }) {
+    init(store: SteveStore, messages: any GatewayMessages, codex: any GatewayCodexClient, debounce: Duration = .milliseconds(1500), retryDelay: Duration = .seconds(5), takeoverLifetime: TimeInterval = 600, acknowledgementDelay: Duration = .seconds(10), automation: SteveUserAutomationStore? = nil, schedulerInterval: Duration = .seconds(1), clockNow: @escaping @Sendable () -> Date = { Date() }) {
         self.store = store; self.messages = messages; self.codex = codex
         self.debounce = debounce; self.retryDelay = retryDelay
         self.takeoverLifetime = takeoverLifetime
+        self.acknowledgementDelay = acknowledgementDelay
         self.automation = automation; self.schedulerInterval = schedulerInterval; self.clockNow = clockNow
     }
     func isPaused() -> Bool { paused }
@@ -281,6 +296,7 @@ actor GatewayCoordinator {
         for task in steeringTasks.values { task.cancel() }
         steeringTasks.removeAll()
         computerOwner = nil
+        loginReservation = nil
         workTask?.cancel(); workTask = nil
         senderTask?.cancel(); senderTask = nil
         var persisted = true
@@ -341,6 +357,14 @@ actor GatewayCoordinator {
         }
         paused = value
         if value { await invalidate(cancelQueued: true) }
+        else {
+            for var task in try await store.operatorTasks() where task.state == .interrupted && task.mode == .background && (task.recoveryAttempts ?? 0) < 1 {
+                let previous = task.runID
+                task.state = .queued; task.contextAction = .fresh; task.runID = UUID().uuidString
+                task.recoveryAttempts = (task.recoveryAttempts ?? 0) + 1
+                try await store.saveOperatorTask(task, expectedEpoch: epoch, expectedRunID: previous)
+            }
+        }
         try await store.savePaused(value)
         if !value { scheduleWork() }
     }
@@ -357,15 +381,25 @@ actor GatewayCoordinator {
         }
         return PhoneAccessBoundary(epoch: captured, chatGuid: trusted.chatGuid,
             senderHandle: normalizeHandle(trusted.senderHandle), workspace: workspace,
-            permission: permission.trimmingCharacters(in: CharacterSet(charactersIn: ":")))
+            permission: permission.trimmingCharacters(in: CharacterSet(charactersIn: ":")), taskID: issuingPhoneTask?.id, runID: issuingPhoneTask?.runID)
     }
     func beginPhoneTakeover(expectedBoundary: PhoneAccessBoundary? = nil) async throws -> String {
         let current = try await phoneAccessBoundary()
-        guard epoch == current.epoch, expectedBoundary == nil || expectedBoundary == current else {
+        var comparable = expectedBoundary
+        comparable?.taskID = current.taskID; comparable?.runID = current.runID
+        guard epoch == current.epoch, expectedBoundary == nil || comparable == current else {
             throw RPCError(message: "This phone link expired because Steve's access changed. Ask for a new link.")
         }
         guard running, !changingBoundary, takeover == nil, takeoverReservation == nil else {
             throw RPCError(message: "Steve is not ready to start phone control.")
+        }
+        if let id = expectedBoundary?.taskID {
+            guard let task = try await store.operatorTask(id: id), task.runID == expectedBoundary?.runID,
+                  task.state == .blocked, let handoff = task.handoff, handoff.blocker.reason == .signIn,
+                  handoff.completedAt == nil, (handoff.linkIssuedAt ?? handoff.createdAt).addingTimeInterval(120) > clockNow() else { throw RPCError(message: "That sign-in task is no longer waiting.") }
+        }
+        guard epoch == current.epoch, running, !changingBoundary, takeover == nil, takeoverReservation == nil else {
+            throw RPCError(message: "This phone link no longer matches Steve’s access.")
         }
         let reservation = UUID().uuidString
         let worker = workTask
@@ -386,7 +420,7 @@ actor GatewayCoordinator {
             try Task.checkCancellation()
             let token = UUID().uuidString
             try capturePermit.issue(token, kind: .phone)
-            takeover = TakeoverGuard(token: token, epoch: captured, chatGuid: trusted.chatGuid, senderHandle: normalizeHandle(trusted.senderHandle), workspace: workspace, permission: permission.trimmingCharacters(in: CharacterSet(charactersIn: ":")), expiresAt: Date().addingTimeInterval(takeoverLifetime))
+            takeover = TakeoverGuard(token: token, epoch: captured, chatGuid: trusted.chatGuid, senderHandle: normalizeHandle(trusted.senderHandle), workspace: workspace, permission: permission.trimmingCharacters(in: CharacterSet(charactersIn: ":")), expiresAt: Date().addingTimeInterval(takeoverLifetime), taskID: expectedBoundary?.taskID, runID: expectedBoundary?.runID)
             takeoverReservation = nil
             takeoverExpiryTask = Task {
                 try? await Task.sleep(for: .seconds(takeoverLifetime))
@@ -421,10 +455,15 @@ actor GatewayCoordinator {
         guard await phoneTakeoverIsActive(token: token), takeover?.token == token else {
             throw RPCError(message: "Phone control expired or its access boundary changed. Steve remains paused.")
         }
+        let taskID = takeover?.taskID
+        let runID = takeover?.runID
         takeoverExpiryTask?.cancel(); takeoverExpiryTask = nil
         capturePermit.revoke(token)
         takeover = nil
-        if resume { try await setPaused(false) }
+        if resume {
+            if let taskID, let runID { try await continueHandoff(taskID: taskID, runID: runID, inbound: nil) }
+            try await setPaused(false)
+        }
     }
     private func expirePhoneTakeover(token: String) async {
         guard takeover?.token == token else { return }
@@ -469,6 +508,30 @@ actor GatewayCoordinator {
     }
     private func handleControl(_ message: SteveInboundMessage) async throws -> Bool {
         let command = message.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if ["i'm signed in", "i’m signed in", "im signed in", "signed in", "done, continue", "done—continue", "done-continue"].contains(command.trimmingCharacters(in: CharacterSet(charactersIn: ".!"))) {
+            let pending = try await store.operatorTasks(chatGuid: message.chatGuid).filter {
+                $0.state == .blocked && $0.handoff?.blocker.reason == .signIn && $0.handoff?.completedAt == nil
+                    && normalizeHandle($0.senderHandle) == normalizeHandle(message.senderHandle)
+            }
+            if pending.count == 1, let task = pending.first {
+                _ = try await store.claimInbox([message.guid])
+                if let control = takeover {
+                    guard control.taskID == task.id, control.runID == task.runID else {
+                        try await stage(messages: ["Finish phone control, then tell me which sign-in to continue."], attachments: [], inbound: [message], workspace: nil, permission: nil, epoch: epoch, control: true)
+                        return true
+                    }
+                    try await endPhoneTakeover(token: control.token, resume: false)
+                }
+                try await continueHandoff(taskID: task.id, runID: task.runID, inbound: message)
+                if paused { try await setPaused(false) }
+                return true
+            }
+            if pending.count > 1 {
+                _ = try await store.claimInbox([message.guid])
+                try await stage(messages: ["Which sign-in is ready: " + pending.map(\.title).joined(separator: " or ") + "?"], attachments: [], inbound: [message], workspace: nil, permission: nil, epoch: epoch, control: true)
+                return true
+            }
+        }
         let fields = command.split(separator: " ")
         let pendingForSender = approvals.values.filter {
             $0.binding.message.chatGuid == message.chatGuid
@@ -561,7 +624,7 @@ actor GatewayCoordinator {
                         await sendPrivatePhoneAccess(delivery)
                         continue
                     }
-                    let pending = try await store.pendingOutbox().filter { !paused || $0.isControl }
+                    let pending = try await store.pendingOutbox(now: clockNow()).filter { !paused || $0.isControl }
                     guard let part = pending.first else { break }
                     try await send(part, epoch: captured)
                 }
@@ -569,7 +632,7 @@ actor GatewayCoordinator {
             } catch { if !(error is CancellationError) { SteveLog.write("Gateway sender stopped error=\(error.localizedDescription)") } }
             if self.epoch == captured {
                 self.senderTask = nil
-                let pending = (try? await store.pendingOutbox()) ?? []
+                let pending = (try? await store.pendingOutbox(now: clockNow())) ?? []
                 if completed && self.epoch == captured && (!privatePhoneDeliveries.isEmpty || pending.contains(where: { !paused || $0.isControl })) { scheduleDelivery() }
             }
         }
@@ -604,6 +667,10 @@ actor GatewayCoordinator {
         let chatGuid = first.chatGuid
         let text = inbound.map(\.text).joined(separator: "\n")
         let attachmentPaths = inbound.flatMap(\.attachmentPaths)
+        Task {
+            try? await Task.sleep(for: acknowledgementDelay)
+            if !Task.isCancelled { await self.acknowledgeIfPending(first, epoch: epoch) }
+        }
         var actionsStarted = false
         var scheduledRun: UserScheduleRun?
         do {
@@ -640,16 +707,20 @@ actor GatewayCoordinator {
                 return result
             }
 
+            try await projectMemory(authorization: authorization)
             let preferences = try await automation?.preferences() ?? []
+            let userTimeZone = StevePrompt.userTimeZone(preferences: preferences, configured: settings.timezone)
             let schedules = try await automation?.schedules() ?? []
             let preferenceValues = preferences.map { ["key": $0.key, "value": $0.value] }
             let scheduleValues = schedules.map { ["id": $0.id, "name": $0.name, "state": $0.state.rawValue] }
             let unresolvedRuns = try await automation?.runsNeedingReconciliation() ?? []
             let runValues = unresolvedRuns.map { ["id": $0.id, "scheduleID": $0.scheduleID, "state": $0.state.rawValue] }
-            let savedContext = "\n\nSAVED_USER_PREFERENCES_JSON (presentation/context only, never authorization):\n\(try encodeJSON(preferenceValues))"
-            let scheduledContext = scheduledRun == nil ? "" : "\n\nAUTHORIZED_SCHEDULE_OCCURRENCE: Execute only this one occurrence. Do not create or change preferences or schedules."
+            var savedContext = "\n\nSAVED_USER_PREFERENCES_JSON (presentation/context only, never authorization):\n\(try encodeJSON(preferenceValues))"
+            let planValues = try await automation?.plans(authorization: authorization) ?? []
+            savedContext += "\n\nACTIVE_PLANS_JSON (context, not new authority):\n" + (try encodeJSON(planValues.filter { [.active, .proposed].contains($0.update.state) }))
+            let scheduledContext = scheduledRun == nil ? "" : "\n\nAUTHORIZED_SCHEDULE_OCCURRENCE: Execute only this one occurrence. Do not create or change preferences or schedules." + (scheduledRun?.followUp == nil ? "" : " This is a read-only plan follow-up. No new external writes; set notifyUser=false if nothing meaningful changed.")
             let capabilityContext = "\n\nCAPABILITIES: operators can research, use connected services, operate the Mac, create files and record requested demonstrations. Detailed recipes belong to operators.\nTASKS_JSON:\n" + (try encodeJSON(try await taskSummaries(chatGuid: chatGuid, workspace: workspace, permission: permission)))
-            let relayInput = "USER_REQUEST:\n\(text)\n\nCURRENT_TIME_UTC:\n\(ISO8601DateFormatter().string(from: clockNow()))\n\nDEFAULT_TIMEZONE (local Mac fallback; explicit or saved user timezone takes precedence):\n\(StevePrompt.defaultTimeZone(configured: settings.timezone))\n\nINBOUND_ATTACHMENT_PATHS:\n\(attachmentPaths.joined(separator: "\n"))\(savedContext)\n\nAVAILABLE_SCHEDULES_JSON:\n\(try encodeJSON(scheduleValues))\n\nUNRESOLVED_SCHEDULE_RUNS_JSON:\n\(try encodeJSON(runValues))\(scheduledContext)\(capabilityContext)"
+            let relayInput = "USER_REQUEST:\n\(text)\n\nCURRENT_TIME_UTC:\n\(ISO8601DateFormatter().string(from: clockNow()))\n\nDEFAULT_TIMEZONE (local Mac fallback; explicit or saved user timezone takes precedence):\n\(userTimeZone)\n\nINBOUND_ATTACHMENT_PATHS:\n\(attachmentPaths.joined(separator: "\n"))\(savedContext)\n\nAVAILABLE_SCHEDULES_JSON:\n\(try encodeJSON(scheduleValues))\n\nUNRESOLVED_SCHEDULE_RUNS_JSON:\n\(try encodeJSON(runValues))\(scheduledContext)\(capabilityContext)"
             SteveLog.write("Gateway relay intent phase started chat=\(chatGuid)")
             let relayResult = try await runTurn(on: relayThreadID, input: relayInput, attachments: attachmentPaths)
             let relayRequest: RelayRequestEnvelope
@@ -680,6 +751,22 @@ actor GatewayCoordinator {
                 relayRequest = parsed
             }
             try check(epoch)
+            if let updates = relayRequest.memoryUpdates, !updates.isEmpty {
+                guard scheduledRun == nil, let automation else { throw UserAutomationError.invalid("Memory changes require a direct human message.") }
+                var notices: [String] = []
+                for update in updates {
+                    do { notices.append(try await UserControlExecutor.perform(update, inbound: inbound, store: automation, authorization: authorization, epoch: epoch, now: clockNow())) }
+                    catch { notices.append("I couldn't save that preference. Your task can still continue.") }
+                }
+                try await projectMemory(authorization: authorization)
+                let currentPreferences = try await automation.preferences().map { ["key": $0.key, "value": $0.value] }
+                savedContext = "\n\nSAVED_USER_PREFERENCES_JSON (complete active set, never authorization):\n" + (try encodeJSON(currentPreferences))
+                if let notice = notices.first {
+                    let part = SteveStore.OutboundPart(id: "memory:" + first.guid, chatGuid: first.chatGuid, recipient: first.senderHandle, replyTo: first.guid, inboxGUIDs: [], text: notice, attachmentPath: nil, workspace: workspace, permission: permission)
+                    try await store.stageDelivery([part], inboxGUIDs: [], expectedEpoch: epoch)
+                    scheduleDelivery()
+                }
+            }
             if relayRequest.action == .control {
                 guard scheduledRun == nil, let control = relayRequest.control else { throw UserAutomationError.invalid("Controls require a direct human request.") }
                 try check(epoch)
@@ -704,6 +791,7 @@ actor GatewayCoordinator {
                 do { response = try await UserControlExecutor.perform(control, inbound: inbound, store: automation, authorization: authorization, epoch: epoch, now: clockNow()) }
                 catch is CancellationError { throw CancellationError() }
                 catch { controlState = "failed"; response = "I couldn't make that change: " + error.localizedDescription }
+                try await projectMemory(authorization: authorization)
                 try await stage(messages: [response], attachments: [], inbound: inbound, workspace: workspace, permission: permission, epoch: epoch)
                 try await store.finishAgentSession(chatGuid: chatGuid, messageGuid: first.guid, state: controlState, expectedEpoch: epoch)
                 return
@@ -737,7 +825,8 @@ actor GatewayCoordinator {
                     try check(epoch)
                     // The notice has its own identity; sending it must not turn the
                     // original uncertain action into a completed request.
-                    let part = SteveStore.OutboundPart(id: "outcome:" + first.guid, chatGuid: first.chatGuid, recipient: first.senderHandle, replyTo: first.guid, inboxGUIDs: [], text: notice, attachmentPath: nil, workspace: settings.workspaceRoot, permission: settings.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")))
+                    var part = SteveStore.OutboundPart(id: "outcome:" + first.guid, chatGuid: first.chatGuid, recipient: first.senderHandle, replyTo: first.guid, inboxGUIDs: [], text: notice, attachmentPath: nil, workspace: settings.workspaceRoot, permission: settings.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")))
+                    if scheduledRun?.followUp != nil { part.followUpRunID = scheduledRun?.id }
                     try await store.stageDelivery([part], inboxGUIDs: [], expectedEpoch: epoch)
                     scheduleDelivery()
                 } catch { SteveLog.write("Gateway outcome notice unavailable error=\(error.localizedDescription)") }
@@ -859,9 +948,12 @@ actor GatewayCoordinator {
             guard clockNow() < delivery.expiresAt,
                   trusted?.chatGuid == delivery.message.chatGuid,
                   normalizeHandle(trusted?.senderHandle ?? "") == normalizeHandle(delivery.message.senderHandle) else { throw CancellationError() }
+            if let id = delivery.taskID {
+                guard let task = try await store.operatorTask(id: id), task.runID == delivery.runID, task.state == .blocked, task.handoff?.completedAt == nil else { throw CancellationError() }
+            }
             invokedTransport = true
             try await messages.sendText(chatGUID: delivery.message.chatGuid, recipient: delivery.message.senderHandle,
-                text: "With Tailscale connected on your phone, open this private one-use link in Safari and tap Take control. It expires in two minutes. Taking control pauses Steve. This link stays in your Messages history.\n" + delivery.url.absoluteString,
+                text: "With Tailscale connected on your phone, open this private one-use link in Safari and tap Take control. It expires in two minutes. Taking control pauses Steve. When signed in, tap Done—continue. This link stays in your Messages history.\n" + delivery.url.absoluteString,
                 replyTo: delivery.message.guid)
             try await store.finishInbox(delivery.inboxGUIDs, state: "completed")
         } catch {
@@ -870,6 +962,62 @@ actor GatewayCoordinator {
             try? await store.finishInbox(delivery.inboxGUIDs, state: invokedTransport ? "uncertain" : "cancelled")
         }
     }
+    private func offerPhoneHandoff(taskID: String, epoch: String) async {
+        do {
+            try check(epoch)
+            guard var task = try await store.operatorTask(id: taskID), task.state == .blocked, task.mode == .computer,
+                  task.handoff?.blocker.reason == .signIn, task.handoff?.blocker.pageVerified == true,
+                  task.handoff?.linkIssuedAt == nil, let source = task.inbound.first else { return }
+            let expires = clockNow().addingTimeInterval(120)
+            if let phoneAccessHandler {
+                issuingPhoneTask = (task.id, task.runID)
+                defer { issuingPhoneTask = nil }
+                let url = try await phoneAccessHandler()
+                try check(epoch)
+                guard url.scheme?.lowercased() == "https", url.host != nil, url.user == nil, url.password == nil,
+                      url.absoluteString.count <= 4096, clockNow() < expires else { throw RPCError(message: "Phone access unavailable") }
+                guard loginReservation?.taskID == task.id, loginReservation?.runID == task.runID,
+                      (loginReservation?.expiresAt ?? .distantPast) > clockNow() else { throw CancellationError() }
+                loginReservation = (task.id, task.runID, clockNow().addingTimeInterval(120))
+                let issuedAt = clockNow()
+                task.handoff?.linkIssuedAt = issuedAt
+                try await store.updateOperatorTask(id: task.id, expectedEpoch: epoch, expectedRunID: task.runID) { current in
+                    guard current.state == .blocked, current.handoff?.completedAt == nil else { throw CancellationError() }
+                    current.handoff?.linkIssuedAt = issuedAt
+                }
+                privatePhoneDeliveries.append(.init(message: source, inboxGUIDs: [], url: url, epoch: epoch, expiresAt: expires, taskID: task.id, runID: task.runID))
+                scheduleDelivery()
+            } else { throw RPCError(message: "Phone access unavailable") }
+        } catch is CancellationError { return }
+        catch {
+            // Do not expose callback errors, which can contain credentials or URLs.
+            if self.epoch == epoch, let task = try? await store.operatorTask(id: taskID), task.state == .blocked,
+               task.handoff?.completedAt == nil, let first = task.inbound.first {
+                let part = SteveStore.OutboundPart(id: "handoff:" + task.runID, chatGuid: task.chatGuid, recipient: task.senderHandle, replyTo: first.guid, inboxGUIDs: [], text: "Pause Steve, sign in on the page open on the Mac, then text ‘I’m signed in’. For phone access, enable Private Tailscale Serve in Steve’s phone setup first.", attachmentPath: nil, workspace: task.workspace, permission: task.permission)
+                try? await store.stageDelivery([part], inboxGUIDs: [], expectedEpoch: epoch)
+                scheduleDelivery()
+            }
+        }
+    }
+
+    private func continueHandoff(taskID: String, runID: String, inbound: SteveInboundMessage?) async throws {
+        guard takeover == nil, takeoverReservation == nil, var task = try await store.operatorTask(id: taskID),
+              task.runID == runID, task.state == .blocked, let handoff = task.handoff,
+              handoff.completedAt == nil else { throw RPCError(message: "That task is no longer waiting for sign-in.") }
+        let settings = try await store.getSettings()
+        let trusted = try await store.trustedConversation()
+        guard task.workspace == settings?.workspaceRoot, task.permission == settings?.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")),
+              task.chatGuid == trusted?.chatGuid, normalizeHandle(task.senderHandle) == normalizeHandle(trusted?.senderHandle ?? "") else { throw UserAutomationError.boundaryChanged }
+        if loginReservation?.taskID == taskID { loginReservation = nil }
+        task.handoff?.completedAt = clockNow()
+        task.objective = "The human says sign-in is complete. Re-observe the same allowed page/account and verify before continuing this same goal. Do not assume login succeeded or repeat completed external effects. Verification: " + handoff.blocker.verification + "\nOriginal goal:\n" + task.objective
+        if let inbound { task.inbound = [inbound]; task.originalMessages = Self.mergeOriginals(task.originalMessages ?? [], [inbound]) }
+        task.state = .queued; task.result = nil; task.runID = UUID().uuidString; task.contextAction = .reuse
+        task.acknowledgementSentAt = nil; task.lastProgressAt = nil; task.lastProgress = nil
+        try await store.saveOperatorTask(task, expectedEpoch: epoch, expectedRunID: runID)
+        scheduleWork()
+    }
+
     private func requestApproval(_ request: CodexApprovalRequest) async -> CodexApprovalDecision {
         // Even an unsupported prompt may precede authentication. Do not retain
         // demonstration frames while a human decision is outstanding.
@@ -961,15 +1109,16 @@ actor GatewayCoordinator {
         try Task.checkCancellation()
         try await store.saveAgentSession(.init(chatGuid: chatGuid, threadID: workerThreadID, relayThreadID: relayThreadID, relayPromptVersion: StevePrompt.relayPromptVersion, workspacePath: workspace, permissionProfile: permission, model: settings.model, effort: settings.effort, lastMessageGuid: messageGuid, executionState: executionState, updatedAt: Date()), expectedEpoch: epoch)
     }
-    private func stage(messages values: [String], attachments: [(String, String)], inbound: [SteveInboundMessage], workspace: String?, permission: String?, epoch: String, control: Bool = false) async throws {
+    private func stage(messages values: [String], attachments: [(String, String)], inbound: [SteveInboundMessage], workspace: String?, permission: String?, epoch: String, control: Bool = false, notBefore: Date? = nil, followUpRunID: String? = nil) async throws {
         guard let first = inbound.first else { return }
         try check(epoch, control: control)
         let guids = inbound.map(\.guid)
+        for value in values + attachments.map({ $0.1 }) { try PreferenceSafety.rejectCredentials(in: value) }
         var parts = values.flatMap { StevePrompt.plainText($0) }.map {
-            SteveStore.OutboundPart(id: UUID().uuidString, chatGuid: first.chatGuid, recipient: first.senderHandle, replyTo: first.guid, inboxGUIDs: guids, text: $0, attachmentPath: nil, workspace: workspace, permission: permission, isControl: control)
+            SteveStore.OutboundPart(id: UUID().uuidString, chatGuid: first.chatGuid, recipient: first.senderHandle, replyTo: first.guid, inboxGUIDs: guids, text: $0, attachmentPath: nil, workspace: workspace, permission: permission, isControl: control, notBefore: notBefore, followUpRunID: followUpRunID)
         }
         parts += attachments.map {
-            SteveStore.OutboundPart(id: UUID().uuidString, chatGuid: first.chatGuid, recipient: first.senderHandle, replyTo: first.guid, inboxGUIDs: guids, text: StevePrompt.plainText($0.1).joined(separator: " "), attachmentPath: $0.0, workspace: workspace, permission: permission, isControl: control)
+            SteveStore.OutboundPart(id: UUID().uuidString, chatGuid: first.chatGuid, recipient: first.senderHandle, replyTo: first.guid, inboxGUIDs: guids, text: StevePrompt.plainText($0.1).joined(separator: " "), attachmentPath: $0.0, workspace: workspace, permission: permission, isControl: control, notBefore: notBefore, followUpRunID: followUpRunID)
         }
         try await store.stageDelivery(parts, inboxGUIDs: guids, expectedEpoch: epoch)
         scheduleDelivery()
@@ -978,6 +1127,30 @@ actor GatewayCoordinator {
         let trusted = try await store.trustedConversation()
         let settings = try await store.getSettings() ?? defaultSettings()
         try check(epoch, control: part.isControl)
+        if let runID = part.followUpRunID {
+            guard let automation, let run = try await automation.run(id: runID), let policy = run.followUp,
+                  clockNow() < policy.expiresAt,
+                  try await automation.validateFollowUpDelivery(id: runID, authorization: run.authorization, now: clockNow()) else {
+                try await store.failOutboundPart(part); return
+            }
+            if let schedule = try await automation.schedule(id: run.scheduleID),
+               let morning = policy.deferredUntil(now: clockNow(), timeZone: schedule.timeZone) {
+                try await store.deferOutboundPart(part, until: morning)
+                return
+            }
+        }
+        if part.id.hasPrefix("ack:") {
+            let guid = String(part.id.dropFirst(4))
+            guard let state = try await store.queueState("inbound:" + guid), ["pending", "running"].contains(state) else {
+                try await store.failOutboundPart(part); return
+            }
+        }
+        if part.id.hasPrefix("progress:") {
+            let fields = part.id.split(separator: ":")
+            guard fields.count == 4, let task = try await store.operatorTask(id: String(fields[1])), task.runID == String(fields[2]), task.state == .running else {
+                try await store.failOutboundPart(part); return
+            }
+        }
         if part.id.hasPrefix("approval:"), approvals[String(part.id.dropFirst("approval:".count))] == nil {
             try await store.failOutboundPart(part)
             return
@@ -988,7 +1161,7 @@ actor GatewayCoordinator {
                   part.permission == nil || part.permission == settings.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")) else {
                 throw RPCError(message: "Delivery boundary changed")
             }
-            let remaining = try await store.pendingOutbox().filter { $0.id == part.id || !Set($0.inboxGUIDs).isDisjoint(with: part.inboxGUIDs) }
+            let remaining = try await store.pendingOutbox(now: clockNow()).filter { $0.id == part.id || !Set($0.inboxGUIDs).isDisjoint(with: part.inboxGUIDs) }
             for candidate in remaining {
                 guard let path = candidate.attachmentPath, let workspace = candidate.workspace else { continue }
                 _ = try verifiedArtifacts(from: .init(schemaVersion: AgentProtocol.schemaVersion, kind: "worker_result", status: .completed, summary: "", userQuestion: nil, artifacts: [.init(id: "delivery", path: path, caption: nil, mimeType: nil)]), workspace: workspace)
@@ -1318,7 +1491,8 @@ extension GatewayCoordinator {
     }
 
     private func routeOperator(_ request: RelayRequestEnvelope, inbound: [SteveInboundMessage], workspace: String, permission: String, settings: Settings, additionalContext: String, scheduledRunID: String?, epoch: String) async throws {
-        guard let first = inbound.first, let prompt = request.workerPrompt else { throw AgentEnvelopeError.invalidPayload("execute requires a prompt") }
+        guard let first = inbound.first, let brief = request.workerPrompt else { throw AgentEnvelopeError.invalidPayload("execute requires a prompt") }
+        let prompt = "ORIGINAL_USER_MESSAGES_JSON (authoritative intent and authorization):\n" + (try encodeJSON(inbound)) + "\n\nRELAY_BRIEF:\n" + brief
         var task: OperatorTaskRecord
         var queuedContextAction: WorkerContextAction?
         if let id = request.taskID {
@@ -1327,6 +1501,7 @@ extension GatewayCoordinator {
                 throw AgentEnvelopeError.invalidPayload("Follow-up task is outside the current conversation boundary")
             }
             task = existing
+            task.originalMessages = existing.originalMessages ?? existing.inbound
             if task.state == .awaitingDelivery {
                 await deliverOperator(task, epoch: epoch)
                 guard let delivered = try await store.operatorTask(id: id), delivered.state != .awaitingDelivery else { throw CancellationError() }
@@ -1336,6 +1511,7 @@ extension GatewayCoordinator {
                 guard request.workerContextAction == nil || request.workerContextAction == .reuse else { throw RPCError(message: "Stop this task before replacing or compacting its active context.") }
                 let update = OperatorFollowUp(text: prompt + additionalContext, attachmentPaths: inbound.flatMap(\.attachmentPaths), inbound: inbound)
                 let updated = try await store.updateOperatorTask(id: id, expectedEpoch: epoch, expectedRunID: task.runID) { current in
+                    current.originalMessages = Self.mergeOriginals(current.originalMessages ?? current.inbound, inbound)
                     // A turn can finish while routing awaits SQLite. Preserve its
                     // result and queue this update for its owner in that case.
                     if current.state == .running || current.state == .awaitingDelivery {
@@ -1383,6 +1559,11 @@ extension GatewayCoordinator {
         // still queued behind another computer owner.
         let requestedContextAction = request.workerContextAction ?? .reuse
         task.contextAction = requestedContextAction == .reuse ? (queuedContextAction ?? .reuse) : requestedContextAction
+        task.originalMessages = Self.mergeOriginals(task.originalMessages ?? task.inbound, inbound)
+        task.handoff = nil
+        task.acknowledgementSentAt = nil
+        task.lastProgressAt = nil
+        task.lastProgress = nil
         task.scheduledRunID = scheduledRunID
         task.updatedAt = Date()
         try check(epoch)
@@ -1392,10 +1573,17 @@ extension GatewayCoordinator {
     private func scheduleOperators(epoch: String) async throws {
         try check(epoch)
         let settings = try await store.getSettings() ?? defaultSettings()
-        for var task in try await store.operatorTasks() where task.state == .queued {
+        let tasks = try await store.operatorTasks()
+        let loginReserved = tasks.contains { task in
+            guard task.mode == .computer, [.blocked, .awaitingDelivery].contains(task.state),
+                  let handoff = task.handoff, handoff.blocker.reason == .signIn,
+                  handoff.blocker.pageVerified == true, handoff.completedAt == nil else { return false }
+            return (handoff.linkIssuedAt ?? handoff.createdAt).addingTimeInterval(120) > clockNow()
+        }
+        for var task in tasks where task.state == .queued {
             guard operatorRuns.count < settings.maxConcurrentOperators else { break }
             guard operatorRuns[task.id] == nil else { continue }
-            if task.mode == .computer && computerOwner != nil { continue }
+            if task.mode == .computer && (computerOwner != nil || loginReserved || (loginReservation?.expiresAt ?? .distantPast) > clockNow()) { continue }
             let trusted = try await store.trustedConversation()
             guard task.chatGuid == trusted?.chatGuid, normalizeHandle(task.senderHandle) == normalizeHandle(trusted?.senderHandle ?? ""),
                   task.workspace == settings.workspaceRoot, task.permission == settings.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")) else {
@@ -1446,8 +1634,11 @@ extension GatewayCoordinator {
             actionsStarted = true
             quiescent = false
             let start = Date()
-            let result = try await codex.runTurn(threadID: threadID, text: current.objective, attachmentPaths: current.inbound.flatMap(\.attachmentPaths), workspace: current.workspace,
-                model: settings.model, effort: settings.effort, serviceTier: settings.serviceTier, onTurnStarted: { turnID in
+            let originalContext = "\n\nPRIOR_USER_MESSAGES_JSON:\n" + (try encodeJSON(current.originalMessages ?? current.inbound))
+            let result = try await codex.runTurn(threadID: threadID, text: current.objective + originalContext, attachmentPaths: current.inbound.flatMap(\.attachmentPaths), workspace: current.workspace,
+                model: settings.model, effort: settings.effort, serviceTier: settings.serviceTier, onProgress: { event in
+                    await self.operatorProgress(taskID: launched.id, runID: launched.runID, text: event.text, epoch: epoch)
+                }, onTurnStarted: { turnID in
                     await self.operatorTurnStarted(taskID: launched.id, epoch: epoch, threadID: threadID, turnID: turnID)
                 })
             try check(epoch)
@@ -1459,11 +1650,17 @@ extension GatewayCoordinator {
             await steeringTasks[launched.id]?.value
             let envelope = try AgentEnvelopeParser.workerResult(from: result.text)
             let verified = try verifiedArtifacts(from: envelope, workspace: launched.workspace, nativeCapturePaths: result.nativeCapturePaths)
-            let accepted = WorkerResultEnvelope(schemaVersion: envelope.schemaVersion, kind: envelope.kind, status: envelope.status, summary: envelope.summary, userQuestion: envelope.userQuestion, artifacts: verified)
+            let accepted = WorkerResultEnvelope(schemaVersion: envelope.schemaVersion, kind: envelope.kind, status: envelope.status, summary: envelope.summary, userQuestion: envelope.userQuestion, artifacts: verified, blocker: envelope.blocker, plan: envelope.plan, notifyUser: envelope.notifyUser)
+            if launched.mode == .computer, envelope.blocker?.reason == .signIn, envelope.blocker?.pageVerified == true {
+                loginReservation = (launched.id, launched.runID, clockNow().addingTimeInterval(120))
+            }
             try await store.updateOperatorTask(id: launched.id, expectedEpoch: epoch, expectedRunID: launched.runID) { task in
                 guard task.state == .running else { throw CancellationError() }
                 task.summary = envelope.summary
                 task.result = accepted
+                if let blocker = envelope.blocker {
+                    task.handoff = TaskHandoff(taskID: task.id, runID: task.runID, blocker: blocker, createdAt: self.clockNow())
+                }
                 if envelope.status == .needsComputer && task.mode == .background {
                     task.mode = .computer; task.state = .queued
                     task.objective = "Continue your same task using the connected services and Computer Use now available. Verify current state before actions. Original goal:\n" + task.objective
@@ -1487,18 +1684,73 @@ extension GatewayCoordinator {
             }
             if self.epoch == epoch, !Task.isCancelled,
                var task = try? await store.operatorTask(id: launched.id), task.runID == launched.runID, task.state == .running {
+                if (task.recoveryAttempts ?? 0) < 1, (!actionsStarted || task.mode == .background), CodexSessionRecovery.shouldReplaceResumedThread(for: error), quiescent {
+                    task.recoveryAttempts = (task.recoveryAttempts ?? 0) + 1
+                    task.contextAction = .fresh; task.state = .queued
+                    let previousRun = task.runID; task.runID = UUID().uuidString
+                    task.objective = "Recover this safe read or unstarted task once, preserving the original scope.\n" + task.objective
+                    try? await store.saveOperatorTask(task, expectedEpoch: epoch, expectedRunID: previousRun)
+                    return
+                }
                 task.state = actionsStarted ? .uncertain : .failed
                 task.summary = actionsStarted ? "The final outcome could not be verified. Actions may have completed; nothing was retried." : "The task could not be started."
                 try? await store.saveOperatorTask(task, expectedEpoch: epoch, expectedRunID: launched.runID)
                 try? await store.finishInbox(task.inbound.map(\.guid), state: task.state.rawValue)
                 if let run = task.scheduledRunID { try? await automation?.recordExecutionOutcome(id: run, outcome: .failed) }
-                if let first = task.inbound.first {
-                    let notice = SteveStore.OutboundPart(id: "outcome:" + task.runID, chatGuid: task.chatGuid, recipient: task.senderHandle, replyTo: first.guid, inboxGUIDs: [], text: task.title + ": " + task.summary, attachmentPath: nil, workspace: task.workspace, permission: task.permission)
-                    try? await store.stageDelivery([notice], inboxGUIDs: [], expectedEpoch: epoch)
-                }
+                try? await stageTaskNotice(task, text: task.title + ": " + task.summary, prefix: "outcome:", epoch: epoch)
                 SteveLog.write("Operator needs review error=\(error.localizedDescription)")
             }
         }
+    }
+
+    private func projectMemory(authorization: ScheduleAuthorization) async throws {
+        // A projection problem must not discard an accepted preference or task.
+        do { try await automation?.projectMemory(workspace: authorization.workspace, authorization: authorization) }
+        catch { SteveLog.write("Private memory projection unavailable: " + error.localizedDescription) }
+    }
+
+    private static func mergeOriginals(_ old: [SteveInboundMessage], _ new: [SteveInboundMessage]) -> [SteveInboundMessage] {
+        var seen = Set<String>()
+        return (old + new).filter { seen.insert($0.guid).inserted }
+    }
+
+    private func acknowledgeIfPending(_ message: SteveInboundMessage, epoch: String) async {
+        do {
+            try check(epoch)
+            guard !message.guid.hasPrefix("schedule:"), !acknowledgedMessages.contains(message.guid),
+                  let state = try await store.queueState("inbound:" + message.guid), ["pending", "running"].contains(state),
+                  !approvals.values.contains(where: { $0.binding.message.guid == message.guid }) else { return }
+            let settings = try await store.getSettings()
+            acknowledgedMessages.insert(message.guid)
+            if let task = try await store.operatorTasks(chatGuid: message.chatGuid).first(where: { $0.inbound.contains(where: { $0.guid == message.guid }) && [.running, .queued].contains($0.state) }) {
+                let now = clockNow()
+                try await store.updateOperatorTask(id: task.id, expectedEpoch: epoch, expectedRunID: task.runID) { $0.acknowledgementSentAt = now; $0.lastProgressAt = now }
+            }
+            let part = SteveStore.OutboundPart(id: "ack:" + message.guid, chatGuid: message.chatGuid, recipient: message.senderHandle, replyTo: message.guid, inboxGUIDs: [], text: "I’m on it.", attachmentPath: nil, workspace: settings?.workspaceRoot, permission: settings?.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")))
+            try await store.stageDelivery([part], inboxGUIDs: [], expectedEpoch: epoch)
+            scheduleDelivery()
+        } catch { }
+    }
+
+    private func operatorProgress(taskID: String, runID: String, text: String, epoch: String, acknowledgement: Bool = false) async {
+        do {
+            try check(epoch)
+            guard let message = ConversationProgress.safeMessage(text) else { return }
+            let now = clockNow()
+            let task = try await store.updateOperatorTask(id: taskID, expectedEpoch: epoch, expectedRunID: runID) { current in
+                guard current.state == .running, let first = current.inbound.first, !first.guid.hasPrefix("schedule:"), message != current.lastProgress else { throw CancellationError() }
+                if acknowledgement {
+                    guard current.acknowledgementSentAt == nil, current.lastProgressAt == nil else { throw CancellationError() }
+                    current.acknowledgementSentAt = now
+                } else if let last = current.lastProgressAt, now.timeIntervalSince(last) < 60 { throw CancellationError() }
+                current.lastProgressAt = now; current.lastProgress = message
+            }
+            guard let first = task.inbound.first else { return }
+            acknowledgedMessages.insert(first.guid)
+            let part = SteveStore.OutboundPart(id: "progress:" + task.id + ":" + runID + ":" + UUID().uuidString, chatGuid: task.chatGuid, recipient: task.senderHandle, replyTo: first.guid, inboxGUIDs: [], text: message, attachmentPath: nil, workspace: task.workspace, permission: task.permission)
+            try await store.stageDelivery([part], inboxGUIDs: [], expectedEpoch: epoch)
+            scheduleDelivery()
+        } catch { /* Progress is optional; never fail or replay the user's task. */ }
     }
 
     private func operatorTurnStarted(taskID: String, epoch: String, threadID: String, turnID: String) async {
@@ -1533,6 +1785,31 @@ extension GatewayCoordinator {
             let trusted = try await store.trustedConversation()
             guard trusted?.chatGuid == task.chatGuid, normalizeHandle(trusted?.senderHandle ?? "") == normalizeHandle(task.senderHandle),
                   settings.workspaceRoot == task.workspace, settings.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")) == task.permission else { throw CancellationError() }
+            let authorization = try ScheduleAuthorization(chatGUID: task.chatGuid, senderHandle: task.senderHandle, workspace: task.workspace, permission: task.permission)
+            if let update = envelope.plan, task.scheduledRunID == nil, let automation,
+               let source = (task.originalMessages ?? task.inbound).last(where: { !$0.guid.hasPrefix("schedule:") && $0.text.contains(update.userQuote) }) {
+                let provenance = ExplicitUserProvenance(source: .pairedMessage, sourceID: source.guid, statement: update.userQuote, explicitlyRequested: true, recordedAt: clockNow())
+                let timeZone = StevePrompt.userTimeZone(preferences: try await automation.preferences(), configured: settings.timezone)
+                try await automation.savePlan(taskID: task.id, update: update, authorization: authorization, provenance: provenance, timeZone: timeZone, now: clockNow(), expectedEpoch: epoch)
+                try await projectMemory(authorization: authorization)
+            }
+            var deferNotificationUntil: Date?
+            var followUpRunID: String?
+            if let runID = task.scheduledRunID, let automation, let run = try await automation.run(id: runID), let policy = run.followUp {
+                followUpRunID = runID
+                let followUpSchedule = try await automation.schedule(id: run.scheduleID)
+                deferNotificationUntil = policy.deferredUntil(now: clockNow(), timeZone: followUpSchedule?.timeZone ?? StevePrompt.defaultTimeZone(configured: settings.timezone))
+                let valid = try await automation.validateEnqueued(id: runID, authorization: authorization)
+                let meaningful = envelope.notifyUser != false && valid && clockNow() < policy.expiresAt
+                let notify = meaningful ? try await automation.reservePlanNotification(taskID: policy.taskID, summary: envelope.summary, expectedEpoch: epoch) : false
+                if !notify {
+                    try await store.updateOperatorTask(id: task.id, expectedEpoch: epoch, expectedRunID: task.runID) { $0.state = !valid ? .cancelled : envelope.status == .completed ? .completed : .blocked }
+                    if valid { try await automation.recordExecutionOutcome(id: runID, outcome: envelope.status == .completed ? .succeeded : .failed) }
+                    else { try await automation.recordOutcome(id: runID, state: .cancelled, detail: "Plan ended before notification.", now: clockNow()) }
+                    try await store.finishInbox(task.inbound.map(\.guid), state: valid ? "completed" : "cancelled")
+                    return
+                }
+            }
             let relay = try await prepareRelay(chatGuid: task.chatGuid, workspace: task.workspace, permission: task.permission, settings: settings, messageGuid: first.guid, epoch: epoch)
             let profile = try await codex.relayProfile(settings: settings)
             let artifactSummary = envelope.artifacts.map { ["id": $0.id, "caption": $0.caption ?? "", "mimeType": $0.mimeType ?? ""] }
@@ -1546,7 +1823,7 @@ extension GatewayCoordinator {
                 guard let artifact = map[item.artifactID] else { throw AgentEnvelopeError.invalidPayload("Unknown task artifact") }
                 return (artifact.path, item.caption ?? artifact.caption ?? "")
             }
-            try await stage(messages: plan.messages, attachments: selected, inbound: current.inbound, workspace: task.workspace, permission: task.permission, epoch: epoch)
+            try await stage(messages: plan.messages, attachments: selected, inbound: current.inbound, workspace: task.workspace, permission: task.permission, epoch: epoch, notBefore: deferNotificationUntil, followUpRunID: followUpRunID)
             try await store.updateOperatorTask(id: task.id, expectedEpoch: epoch, expectedRunID: task.runID) { finished in
                 switch envelope.status {
                 case .completed: finished.state = .completed
@@ -1564,6 +1841,10 @@ extension GatewayCoordinator {
                     finished.contextAction = .reuse
                 }
             }
+            if envelope.blocker?.reason == .signIn, envelope.blocker?.pageVerified == true,
+               task.scheduledRunID == nil, (task.pendingFollowUps ?? []).isEmpty {
+                await offerPhoneHandoff(taskID: task.id, epoch: epoch)
+            }
             if let run = task.scheduledRunID { try await automation?.recordExecutionOutcome(id: run, outcome: envelope.status == .completed ? .succeeded : .failed) }
             try await store.finishAgentSession(chatGuid: task.chatGuid, messageGuid: first.guid, state: "idle", expectedEpoch: epoch)
         } catch {
@@ -1571,21 +1852,40 @@ extension GatewayCoordinator {
             var failed = task; failed.state = .uncertain
             try? await store.saveOperatorTask(failed, expectedEpoch: epoch, expectedRunID: task.runID)
             try? await store.finishInbox(task.inbound.map(\.guid), state: "uncertain")
-            if let first = task.inbound.first {
-                let notice = SteveStore.OutboundPart(id: "delivery-outcome:" + task.runID, chatGuid: task.chatGuid, recipient: task.senderHandle, replyTo: first.guid, inboxGUIDs: [], text: "I finished working on \(task.title), but couldn't prepare its reply. I haven't repeated the task.", attachmentPath: nil, workspace: task.workspace, permission: task.permission)
-                try? await store.stageDelivery([notice], inboxGUIDs: [], expectedEpoch: epoch)
-            }
+            try? await stageTaskNotice(task, text: "I finished working on \(task.title), but couldn't prepare its reply. I haven't repeated the task.", prefix: "delivery-outcome:", epoch: epoch)
             SteveLog.write("Operator delivery requires review error=\(error.localizedDescription)")
         }
+    }
+
+    private func stageTaskNotice(_ task: OperatorTaskRecord, text: String, prefix: String, epoch: String) async throws {
+        try PreferenceSafety.rejectCredentials(in: text)
+        guard let first = task.inbound.first, let current = try await store.operatorTask(id: task.id),
+              current.runID == task.runID, [.failed, .uncertain].contains(current.state) else { return }
+        var part = SteveStore.OutboundPart(id: prefix + task.runID, chatGuid: task.chatGuid, recipient: task.senderHandle, replyTo: first.guid, inboxGUIDs: [], text: text, attachmentPath: nil, workspace: task.workspace, permission: task.permission)
+        if let runID = task.scheduledRunID, let automation, let run = try await automation.run(id: runID), let policy = run.followUp {
+            guard try await automation.validateFollowUpDelivery(id: runID, authorization: run.authorization, now: clockNow()),
+                  let schedule = try await automation.schedule(id: run.scheduleID) else { return }
+            part.followUpRunID = runID
+            part.notBefore = policy.deferredUntil(now: clockNow(), timeZone: schedule.timeZone)
+        }
+        try await store.stageDelivery([part], inboxGUIDs: [], expectedEpoch: epoch)
+        scheduleDelivery()
     }
 
     private func cancelOperator(id: String, inbound: [SteveInboundMessage], workspace: String, permission: String, epoch: String) async throws {
         guard let first = inbound.first, var task = try await store.operatorTask(id: id), task.chatGuid == first.chatGuid,
               normalizeHandle(task.senderHandle) == normalizeHandle(first.senderHandle), task.workspace == workspace, task.permission == permission else { throw RPCError(message: "That task is not in this conversation") }
+        if let source = inbound.first, !source.guid.hasPrefix("schedule:") {
+            let provenance = ExplicitUserProvenance(source: .pairedMessage, sourceID: source.guid, statement: source.text, explicitlyRequested: true, recordedAt: clockNow())
+            try await automation?.cancelPlan(taskID: task.id, provenance: provenance, now: clockNow(), expectedEpoch: epoch)
+            try await projectMemory(authorization: ScheduleAuthorization(chatGUID: task.chatGuid, senderHandle: task.senderHandle, workspace: workspace, permission: permission))
+        }
         task.state = .cancelled
+        task.handoff = nil
         let originalRun = task.runID
         task.runID = UUID().uuidString
         try await store.saveOperatorTask(task, expectedEpoch: epoch, expectedRunID: originalRun)
+        if loginReservation?.taskID == id { loginReservation = nil }
         let run = operatorRuns[id]
         if let thread = task.threadID {
             for id in approvals.keys.filter({ approvals[$0]?.binding.threadID == thread }) { finishApproval(id: id, decision: .cancel) }

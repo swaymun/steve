@@ -203,6 +203,7 @@ final class SteveModel: ObservableObject {
     var configured: Bool { snapshot?.status.connected == true && snapshot?.settings.workspaceRoot != nil && snapshot?.settings.permissionProfile != nil }
     var codexUnavailable: Bool { snapshot?.dependencies.first(where: { $0.name == "codex" })?.available == false }
     var canPhone: Bool { configured }
+    var setupReadiness: SetupReadiness { SetupReadiness.evaluate(snapshot: snapshot, computerUseInstalled: CodexComputerUseRuntime.discover() != nil) }
     var usageRows: [UsageRow] {
         guard let usage = snapshot?.usage else { return [] }; let windows = [usage.primary, usage.secondary].compactMap { $0 }
         return windows.enumerated().map { index, window in
@@ -273,6 +274,23 @@ final class SteveModel: ObservableObject {
     func copyPairingCode() { guard let pairing else { return }; NSPasteboard.general.clearContents(); NSPasteboard.general.setString(pairing.code, forType: .string); message = "Pairing code copied." }
     func openDiagnostics() { SteveLog.open(); message = "Diagnostics opened." }
     func openFullDiskAccessSettings() { message = StevePermissionSettings.open(.fullDiskAccess).summary }
+    func performSetupAction(_ action: SetupReadiness.Action) {
+        switch action {
+        case .refresh: refresh()
+        case .signIn: login()
+        case .chooseWorkspace: chooseWorkspace()
+        case .choosePermissions: break
+        case .openFullDiskAccess: openFullDiskAccessSettings()
+        case .connectPhone: startPhonePairing()
+        case .openComputerUseGuide: SteveBrowser.open(URL(string: "https://github.com/swaymun/steve/blob/main/guide/setup.md#native-computer-use")!)
+        case .resume: if snapshot?.paused == true { togglePause() }
+        case .copyLiveCheck:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString("Open example.com and tell me the heading.", forType: .string)
+            message = "Browser check copied. Send it from the paired conversation."
+        case .diagnostics: openDiagnostics()
+        }
+    }
     func openLoginPage() { if let loginURL { SteveBrowser.open(loginURL) } else { message = "Sign-in is not ready yet." } }
     private func run(_ operation: @escaping (SteveRuntime) async throws -> Void) { guard let runtime else { return }; Task { [weak self] in do { try await operation(runtime); try await runtime.refresh(); await self?.updateSnapshot(from: runtime) } catch { await MainActor.run { self?.message = error.localizedDescription } } } }
     private func updateSnapshot(from runtime: SteveRuntime) async { let value = await runtime.snapshot(); snapshot = value; pendingApproval = await runtime.pendingApproval(); pairing = value.pairing; requiresLogin = value.account?.account == nil; if codexUnavailable { message = value.status.detail.isEmpty ? "Codex is unavailable." : value.status.detail } else if requiresLogin { message = "Sign in to Codex to continue." } else if message == "Checking Codex sign-in…" { message = "" } }
@@ -289,8 +307,18 @@ struct StevePopover: View {
             HStack(spacing: 10) { SteveLogo().frame(width: 30, height: 30); Text("Steve").bold(); Spacer() }.padding(.bottom, 10)
             if !model.message.isEmpty { Text(model.message).font(.caption).foregroundStyle(model.codexUnavailable ? .red : .secondary).padding(.vertical, 10) }
             Divider()
-            if model.codexUnavailable { Text("Steve is paused because Codex is unavailable.").font(.caption).foregroundStyle(.red).padding(.vertical, 8) }
-            else if model.requiresLogin { action("Sign in", prominent: true, action: model.login); if model.loginURL != nil { Button("Open sign-in page", action: model.openLoginPage).buttonStyle(.plain).font(.caption).padding(.horizontal, 8) } }
+            let readiness = model.setupReadiness
+            VStack(alignment: .leading, spacing: 4) {
+                Text(readiness.title).font(.headline)
+                Text(readiness.detail).font(.caption).foregroundStyle(.secondary)
+                Button(readiness.actionTitle) {
+                    if readiness.action == .choosePermissions { permissionsExpanded = true }
+                    else { model.performSetupAction(readiness.action) }
+                }.buttonStyle(.borderedProminent).controlSize(.small).padding(.top, 3)
+            }.padding(.vertical, 10).padding(.horizontal, 7)
+            Divider()
+            if model.codexUnavailable { EmptyView() }
+            else if model.requiresLogin { if model.loginURL != nil { Button("Open sign-in page", action: model.openLoginPage).buttonStyle(.plain).font(.caption).padding(.horizontal, 8) } }
             else {
                 action("Workspace", subtitle: model.snapshot?.settings.workspaceRoot ?? "Not assigned", action: model.chooseWorkspace); Divider()
                 disclosure("Permissions", value: model.snapshot?.settings.permissionProfile.map(humanizeLabel) ?? "Select a profile", expanded: $permissionsExpanded) { ForEach(model.snapshot?.permissions ?? []) { profile in action(humanizeLabel(profile.name ?? profile.id), subtitle: profile.id.trimmingCharacters(in: CharacterSet(charactersIn: ":")) == "danger-full-access" ? permissionDescription(profile.id) : (profile.description ?? permissionDescription(profile.id)), disabled: !profile.allowed) { model.selectPermission(profile.id) } } }

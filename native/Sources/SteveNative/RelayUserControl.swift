@@ -90,7 +90,7 @@ enum UserControlExecutor {
         guard let source = inbound.first(where: { !$0.guid.hasPrefix("schedule:") && $0.text.contains(control.userQuote) }) else {
             throw UserAutomationError.invalid("The control must quote an explicit request in the current human message. Scheduled tasks cannot change preferences or schedules.")
         }
-        let provenance = ExplicitUserProvenance(source: .pairedMessage, sourceID: source.guid, statement: source.text, explicitlyRequested: true, recordedAt: now)
+        let provenance = ExplicitUserProvenance(source: .pairedMessage, sourceID: source.guid, statement: control.userQuote, explicitlyRequested: true, recordedAt: now)
         switch control.operation {
         case .phoneAccess:
             throw UserAutomationError.invalid("Phone access is handled by the trusted runtime.")

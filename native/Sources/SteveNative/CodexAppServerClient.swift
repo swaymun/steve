@@ -844,7 +844,12 @@ final class CodexRPCConnection: @unchecked Sendable {
         return try request(method: method, params: params, allowStart: false)
     }
 
-    func waitForTurn(threadID: String, turnID: String, workspace: String? = nil) async throws -> CodexTurnResult {
+    func waitForTurn(
+        threadID: String,
+        turnID: String,
+        workspace: String? = nil,
+        onProgress: (@Sendable (CodexTurnEvent) async -> Void)? = nil
+    ) async throws -> CodexTurnResult {
         var accumulator = CodexTurnAccumulator(threadID: threadID, turnID: turnID, workspace: workspace)
         let deadline = Date().addingTimeInterval(eventTimeout)
         let key = threadID + ":" + turnID
@@ -858,7 +863,9 @@ final class CodexRPCConnection: @unchecked Sendable {
                 }
                 return params["turnId"] as? String == turnID
             }
-            _ = accumulator.consume(object)
+            if let event = accumulator.consume(object), event.phase == .commentary {
+                await onProgress?(event)
+            }
             if object["method"] as? String == "turn/completed",
                let params = object["params"] as? [String: Any],
                let turn = params["turn"] as? [String: Any] {
@@ -1336,6 +1343,7 @@ actor CodexAppServerClient {
         model: String,
         effort: String,
         serviceTier: SteveServiceTier = .standard,
+        onProgress: (@Sendable (CodexTurnEvent) async -> Void)? = nil,
         onTurnStarted: @escaping @Sendable (String) async -> Void = { _ in }
     ) async throws -> CodexTurnResult {
         try await ensureInitialized()
@@ -1352,7 +1360,7 @@ actor CodexAppServerClient {
             throw RPCError(message: "Codex did not return a turn id")
         }
         await onTurnStarted(turnID)
-        let output = try await waitForTurn(threadID: threadID, turnID: turnID, workspace: workspace)
+        let output = try await waitForTurn(threadID: threadID, turnID: turnID, workspace: workspace, onProgress: onProgress)
         if output.wasInterrupted {
             throw CodexTurnInterrupted()
         }
@@ -1360,6 +1368,31 @@ actor CodexAppServerClient {
             throw RPCError(message: "Codex completed without an agent message")
         }
         return output
+    }
+
+    // Compatibility entry point for callers that have not adopted progress
+    // events yet. Keep progress additive and preserve the established protocol.
+    func runTurn(
+        threadID: String,
+        text: String,
+        attachmentPaths: [String],
+        workspace: String?,
+        model: String,
+        effort: String,
+        serviceTier: SteveServiceTier,
+        onTurnStarted: @escaping @Sendable (String) async -> Void
+    ) async throws -> CodexTurnResult {
+        try await runTurn(
+            threadID: threadID,
+            text: text,
+            attachmentPaths: attachmentPaths,
+            workspace: workspace,
+            model: model,
+            effort: effort,
+            serviceTier: serviceTier,
+            onProgress: nil,
+            onTurnStarted: onTurnStarted
+        )
     }
 
     func interruptTurn(threadID: String, turnID: String) async throws {
@@ -1442,7 +1475,7 @@ actor CodexAppServerClient {
         let currentLifecycle = lifecycle
         let task = Task {
             _ = try await self.request("initialize", params: [
-                "clientInfo": ["name": "steve", "version": "0.1.5"],
+                "clientInfo": ["name": "steve", "version": "0.1.6"],
                 "capabilities": ["experimentalApi": true]
             ])
             try Task.checkCancellation()
@@ -1603,7 +1636,8 @@ actor CodexAppServerClient {
     private func waitForTurn(
         threadID: String,
         turnID: String,
-        workspace: String?
+        workspace: String?,
+        onProgress: (@Sendable (CodexTurnEvent) async -> Void)? = nil
     ) async throws -> CodexTurnResult {
         let connection = self.connection
         let currentLifecycle = lifecycle
@@ -1616,7 +1650,8 @@ actor CodexAppServerClient {
                         try await connection.waitForTurn(
                             threadID: threadID,
                             turnID: turnID,
-                            workspace: workspace
+                            workspace: workspace,
+                            onProgress: onProgress
                         )
                     }
                     defer { group.cancelAll() }

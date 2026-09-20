@@ -34,6 +34,7 @@ struct RelayRequestEnvelope: Codable, Equatable, Sendable {
     let taskID: String?
     let taskTitle: String?
     let mode: OperatorMode?
+    var memoryUpdates: [RelayUserControl]? = nil
 
     init(action: RelayAction, workerPrompt: String? = nil, userMessage: String? = nil, workerContextAction: WorkerContextAction? = nil, control: RelayUserControl? = nil, taskID: String? = nil, taskTitle: String? = nil, mode: OperatorMode? = nil) {
         schemaVersion = AgentProtocol.schemaVersion
@@ -53,11 +54,16 @@ struct RelayRequestEnvelope: Codable, Equatable, Sendable {
             throw AgentEnvelopeError.unsupportedSchema(schemaVersion)
         }
         guard kind == "relay_request" else { throw AgentEnvelopeError.invalidKind(kind) }
+        guard (memoryUpdates?.count ?? 0) <= 8 else { throw AgentEnvelopeError.invalidPayload("Too many memory updates") }
+        for update in memoryUpdates ?? [] {
+            guard [.preferenceSet, .preferenceForget].contains(update.operation) else { throw AgentEnvelopeError.invalidPayload("Memory updates can only set or forget preferences") }
+            try update.validate()
+        }
         switch action {
         case .cancel:
-            guard let taskID, !taskID.isEmpty, workerPrompt == nil, control == nil else { throw AgentEnvelopeError.invalidPayload("cancel requires an existing taskID and no work or control") }
+            guard let taskID, !taskID.isEmpty, (workerPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true), control == nil else { throw AgentEnvelopeError.invalidPayload("cancel requires an existing taskID and no work or control") }
         case .control:
-            guard let control, workerPrompt == nil else { throw AgentEnvelopeError.invalidPayload("control requires a typed control and no workerPrompt") }
+            guard let control, (workerPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) else { throw AgentEnvelopeError.invalidPayload("control requires a typed control and no workerPrompt") }
             try control.validate()
         case .execute:
             guard let workerPrompt, !workerPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -67,7 +73,7 @@ struct RelayRequestEnvelope: Codable, Equatable, Sendable {
             guard let userMessage, !userMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw AgentEnvelopeError.invalidPayload("reply, clarify and refuse require userMessage")
             }
-            guard workerPrompt == nil, control == nil else { throw AgentEnvelopeError.invalidPayload("direct replies cannot also request execution") }
+            guard (workerPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true), control == nil else { throw AgentEnvelopeError.invalidPayload("direct replies cannot also request execution") }
         }
     }
 
@@ -101,12 +107,38 @@ struct WorkerResultEnvelope: Codable, Equatable, Sendable {
     let summary: String
     let userQuestion: String?
     let artifacts: [WorkerArtifactEnvelope]
+    var blocker: WorkerBlocker? = nil
+    var plan: WorkerPlanUpdate? = nil
+    var notifyUser: Bool? = nil
+
+    enum CodingKeys: String, CodingKey { case schemaVersion, kind, status, summary, userQuestion, artifacts, blocker, plan, notifyUser }
+    init(schemaVersion: Int, kind: String, status: WorkerStatus, summary: String, userQuestion: String?, artifacts: [WorkerArtifactEnvelope], blocker: WorkerBlocker? = nil, plan: WorkerPlanUpdate? = nil, notifyUser: Bool? = nil) {
+        self.schemaVersion = schemaVersion; self.kind = kind; self.status = status; self.summary = summary
+        self.userQuestion = userQuestion; self.artifacts = artifacts; self.blocker = blocker; self.plan = plan; self.notifyUser = notifyUser
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
+        kind = try values.decode(String.self, forKey: .kind)
+        status = try values.decode(WorkerStatus.self, forKey: .status)
+        summary = try values.decode(String.self, forKey: .summary)
+        userQuestion = try values.decodeIfPresent(String.self, forKey: .userQuestion)
+        artifacts = try values.decodeIfPresent([WorkerArtifactEnvelope].self, forKey: .artifacts) ?? []
+        blocker = try values.decodeIfPresent(WorkerBlocker.self, forKey: .blocker)
+        plan = try values.decodeIfPresent(WorkerPlanUpdate.self, forKey: .plan)
+        notifyUser = try values.decodeIfPresent(Bool.self, forKey: .notifyUser)
+    }
 
     func validate() throws {
         guard schemaVersion == AgentProtocol.schemaVersion else {
             throw AgentEnvelopeError.unsupportedSchema(schemaVersion)
         }
         guard kind == "worker_result" else { throw AgentEnvelopeError.invalidKind(kind) }
+        if let blocker {
+            guard status == .blocked || status == .needsClarification else { throw AgentEnvelopeError.invalidPayload("A blocker requires a waiting result") }
+            try blocker.validate()
+        }
+        try plan?.validate()
         guard !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AgentEnvelopeError.invalidPayload("worker result requires summary")
         }
@@ -152,6 +184,22 @@ struct DeliveryPlanEnvelope: Codable, Equatable, Sendable {
     let messages: [String]
     let attachments: [DeliveryAttachmentEnvelope]
     let recovery: WorkerRecoveryEnvelope?
+
+    enum CodingKeys: String, CodingKey { case schemaVersion, kind, status, messages, attachments, recovery }
+
+    init(schemaVersion: Int, kind: String, status: DeliveryStatus, messages: [String], attachments: [DeliveryAttachmentEnvelope], recovery: WorkerRecoveryEnvelope?) {
+        self.schemaVersion = schemaVersion; self.kind = kind; self.status = status
+        self.messages = messages; self.attachments = attachments; self.recovery = recovery
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
+        kind = try values.decode(String.self, forKey: .kind)
+        status = try values.decode(DeliveryStatus.self, forKey: .status)
+        messages = try values.decodeIfPresent([String].self, forKey: .messages) ?? []
+        attachments = try values.decodeIfPresent([DeliveryAttachmentEnvelope].self, forKey: .attachments) ?? []
+        recovery = try values.decodeIfPresent(WorkerRecoveryEnvelope.self, forKey: .recovery)
+    }
 
     func validate() throws {
         guard schemaVersion == AgentProtocol.schemaVersion else {

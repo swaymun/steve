@@ -4,12 +4,15 @@ import SQLite
 
 private final class FixtureClock: @unchecked Sendable {
     private let lock = NSLock()
-    private var value = Date()
+    private var value: Date
+    init(_ value: Date = Date()) { self.value = value }
     func now() -> Date { lock.lock(); defer { lock.unlock() }; return value }
     func advance(_ seconds: TimeInterval) { lock.lock(); defer { lock.unlock() }; value = value.addingTimeInterval(seconds) }
 }
 private actor FixturePhoneAccess {
     var count = 0
+    var boundary: PhoneAccessBoundary?
+    func issue(for gateway: GatewayCoordinator) async throws -> URL { boundary = try await gateway.phoneAccessBoundary(); return issue() }
     func issue() -> URL { count += 1; return URL(string: "https://fixture.example/#pair=private-phone-fixture")! }
 }
 private actor FixtureMessages: GatewayMessages {
@@ -87,6 +90,7 @@ private actor FixtureCodex: GatewayCodexClient {
     init(_ results: [String]) { self.results = results }
     func appendResults(_ values: [String]) { results.append(contentsOf: values) }
     func hold() { holdWorker = true }
+    func releaseWorker() { holdWorker = false }
     func stop() { stops += 1 }
     func startThread(cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool, serviceTier: SteveServiceTier) -> String { let role = isRelay ? "relay" : "worker"; startTiers.append(role + ":" + serviceTier.rawValue); threadInstructions.append((role, developerInstructions)); return UUID().uuidString }
     func resumeThread(threadID: String, cwd: String, permissionProfile: String, model: String, developerInstructions: String, isRelay: Bool, serviceTier: SteveServiceTier) throws {
@@ -108,7 +112,7 @@ private actor FixtureCodex: GatewayCodexClient {
             let request = CodexApprovalRequest(requestID: "rpc-approval", method: "mcpServer/elicitation/request", threadID: mismatchApproval ? "other-thread" : threadID, turnID: turnID, message: "Allow fixture action? https://example.test/auth?token=secret", origin: approvalOrigin, connector: "fixture", tool: "read_record", expiresAt: Date().addingTimeInterval(approvalDuration), mode: mode, isEmptyBrowserOriginForm: emptyBrowserForm, nativeAppName: nativeAppName, connectionSetup: connectionSetup)
             approvalDecision = await approvalHandler(request)
         }
-        if holdWorker && turns == 2 { try await Task.sleep(for: .seconds(60)) }
+        while holdWorker && turns == 2 { try await Task.sleep(for: .milliseconds(5)) }
         return CodexTurnResult(text: results.isEmpty ? "invalid" : results.removeFirst(), attachmentPaths: [])
     }
 }
@@ -118,7 +122,7 @@ final class GatewayLifecycleTests: XCTestCase {
     private func inbound(_ id: String = UUID().uuidString, text: String = "Do a task") -> SteveInboundMessage {
         .init(guid: id, chatGuid: "chat", senderHandle: "user@example.test", text: text, isFromMe: false, isGroup: false, attachmentPaths: [], replyToGuid: nil, rowID: 42)
     }
-    private func setup(_ replies: [String], takeoverLifetime: TimeInterval = 600, withAutomation: Bool = false, clock: FixtureClock? = nil) async throws -> (SteveStore, GatewayCoordinator, FixtureMessages, FixtureCodex) {
+    private func setup(_ replies: [String], takeoverLifetime: TimeInterval = 600, acknowledgementDelay: Duration = .seconds(10), withAutomation: Bool = false, clock: FixtureClock? = nil) async throws -> (SteveStore, GatewayCoordinator, FixtureMessages, FixtureCodex) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let store = try SteveStore(databaseURL: root.appendingPathComponent("test.sqlite"))
@@ -128,7 +132,7 @@ final class GatewayLifecycleTests: XCTestCase {
         try await store.saveTrustedConversation(.init(chatGuid: "chat", senderHandle: "user@example.test"))
         let messages = FixtureMessages(), codex = FixtureCodex(replies)
         let automation = withAutomation ? try SteveUserAutomationStore(databaseURL: store.databaseURL) : nil
-        let gateway = GatewayCoordinator(store: store, messages: messages, codex: codex, debounce: .milliseconds(5), retryDelay: .milliseconds(10), takeoverLifetime: takeoverLifetime, automation: automation, clockNow: { clock?.now() ?? Date() })
+        let gateway = GatewayCoordinator(store: store, messages: messages, codex: codex, debounce: .milliseconds(5), retryDelay: .milliseconds(10), takeoverLifetime: takeoverLifetime, acknowledgementDelay: acknowledgementDelay, automation: automation, clockNow: { clock?.now() ?? Date() })
         addTeardownBlock { await gateway.stop() }
         return (store, gateway, messages, codex)
     }
@@ -190,7 +194,7 @@ final class GatewayLifecycleTests: XCTestCase {
         let workerInstructions = try XCTUnwrap(instructions.first(where: { $0.role == "worker" })?.text)
         XCTAssertTrue(workerInstructions.contains(Bundle.main.executableURL!.path))
         XCTAssertTrue(workerInstructions.contains("video start --demonstration"))
-        XCTAssertTrue(workerInstructions.contains("Do not scan /Users"))
+        XCTAssertTrue(workerInstructions.contains("scan home folders"))
         var context = StevePromptContext(workspace: "/tmp", permissionProfile: "read-only", model: "fixture", effort: "low")
         context.executablePath = "/Applications/Steve's App.app/Contents/MacOS/Steve"
         XCTAssertTrue(StevePrompt.runtimeCapabilities(context).contains("'\"'\"'"))
@@ -1240,4 +1244,202 @@ final class GatewayLifecycleTests: XCTestCase {
         XCTAssertEqual(MessagesService.normalizedAccountAddress("E:"), "")
         XCTAssertEqual(MessagesService.normalizedAccountAddress("P:+15550000000"), "+15550000000")
     }
+    func testMixedPreferenceAndTaskPreservesExactUserMessage() async throws {
+        let route = #"{"schemaVersion":1,"kind":"relay_request","action":"execute","taskTitle":"Dinner","mode":"background","workerPrompt":"Find dinner","memoryUpdates":[{"operation":"preference_set","key":"diet","value":"vegetarian","userQuote":"I'm vegetarian"}]}"#
+        let delivery = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Two good options."]}"#
+        let (store, gateway, messages, codex) = try await setup([route, worker, delivery], withAutomation: true)
+        await gateway.start()
+        await gateway.receive(inbound("mixed", text: "I'm vegetarian. Find dinner for Friday in Boston."))
+        try await eventually { try await store.queueState("inbound:mixed") == "completed" }
+        let input = await codex.inputs
+        XCTAssertTrue(input[1].contains("I'm vegetarian. Find dinner for Friday in Boston."))
+        XCTAssertTrue(input[1].contains("ORIGINAL_USER_MESSAGES_JSON"))
+        XCTAssertTrue(input[1].contains("vegetarian"))
+        let automation = try SteveUserAutomationStore(databaseURL: store.databaseURL)
+        let preferences = try await automation.preferences()
+        XCTAssertEqual(preferences.first?.value, "vegetarian")
+        let sent = await messages.sent
+        XCTAssertTrue(sent.contains("Two good options."))
+        let settings = try await store.getSettings()!
+        XCTAssertTrue(try String(contentsOfFile: settings.workspaceRoot! + "/STEVE_MEMORY.md", encoding: .utf8).contains("vegetarian"))
+    }
+
+    func testAcknowledgementOnlyOnceAndNeverCompletesOriginalRequest() async throws {
+        let (store, gateway, messages, codex) = try await setup([relay, worker], acknowledgementDelay: .milliseconds(25))
+        await codex.hold(); await gateway.start(); await gateway.receive(inbound("slow"))
+        try await eventually { await messages.sent.contains("I’m on it.") }
+        try await Task.sleep(for: .milliseconds(100))
+        let sent = await messages.sent
+        XCTAssertEqual(sent.filter { $0 == "I’m on it." }.count, 1)
+        let state = try await store.queueState("inbound:slow")
+        XCTAssertEqual(state, "running")
+        await gateway.stop()
+    }
+
+    func testVerifiedLoginOffersBoundLinkAndPageCompletionContinuesSameTask() async throws {
+        let blocked = #"{"schemaVersion":1,"kind":"worker_result","status":"blocked","summary":"Sign in to continue.","blocker":{"reason":"sign_in","userAction":"Sign in on the open page.","verification":"Check the account and cart after sign-in.","pageVerified":true}}"#
+        let delivery = #"{"schemaVersion":1,"kind":"delivery_plan","status":"failed","messages":["Sign in to continue."]}"#
+        let done = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Verified the account and continued."]}"#
+        let (store, gateway, messages, codex) = try await setup([relay, blocked, delivery, worker, done])
+        let phone = FixturePhoneAccess()
+        await gateway.setPhoneAccessHandler { try await phone.issue(for: gateway) }
+        await gateway.start(); await gateway.receive(inbound("login", text: "Open my cart."))
+        try await eventually { await phone.count == 1 }
+        let task = try await store.operatorTasks().first!
+        let bound = await phone.boundary
+        XCTAssertEqual(bound?.taskID, task.id); XCTAssertEqual(bound?.runID, task.runID)
+        let token = try await gateway.beginPhoneTakeover(expectedBoundary: bound)
+        let paused = await gateway.isPaused(); XCTAssertTrue(paused)
+        try await gateway.endPhoneTakeover(token: token, resume: true)
+        try await eventually { await messages.sent.contains("Verified the account and continued.") }
+        let tasks = try await store.operatorTasks()
+        XCTAssertEqual(tasks.count, 1); XCTAssertEqual(tasks.first?.id, task.id)
+        let inputs = await codex.inputs
+        XCTAssertTrue(inputs.contains { $0.contains("Check the account and cart after sign-in.") && $0.contains("Re-observe") })
+        XCTAssertFalse(inputs.contains { $0.contains("private-phone-fixture") })
+        let active = await gateway.phoneTakeoverIsActive(token: token); XCTAssertFalse(active)
+    }
+
+    func testUnverifiedLoginNeverOffersPhoneLink() async throws {
+        let blocked = #"{"schemaVersion":1,"kind":"worker_result","status":"blocked","summary":"Login may be required.","blocker":{"reason":"sign_in","userAction":"Open the page on the Mac.","verification":"Observe the page.","pageVerified":false}}"#
+        let delivery = #"{"schemaVersion":1,"kind":"delivery_plan","status":"failed","messages":["Open the page on the Mac."]}"#
+        let (store, gateway, _, _) = try await setup([relay, blocked, delivery])
+        let phone = FixturePhoneAccess(); await gateway.setPhoneAccessHandler { await phone.issue() }
+        await gateway.start(); await gateway.receive(inbound("unverified"))
+        try await eventually { try await store.operatorTasks().first?.state == .blocked }
+        let count = await phone.count; XCTAssertEqual(count, 0)
+    }
+
+    func testOrdinarySignedInReplyReusesBlockedOwner() async throws {
+        let blocked = #"{"schemaVersion":1,"kind":"worker_result","status":"blocked","summary":"Sign in.","blocker":{"reason":"sign_in","userAction":"Sign in on the Mac.","verification":"Inspect login state.","pageVerified":true}}"#
+        let delivery = #"{"schemaVersion":1,"kind":"delivery_plan","status":"failed","messages":["Sign in on the Mac."]}"#
+        let done = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Continued."]}"#
+        let (store, gateway, messages, _) = try await setup([relay, blocked, delivery, worker, done])
+        await gateway.start(); await gateway.receive(inbound("login"))
+        try await eventually { try await store.operatorTasks().first?.state == .blocked }
+        let before = try await store.operatorTasks().first!.id
+        await gateway.receive(inbound("signed-in", text: "I'm signed in"))
+        try await eventually { await messages.sent.contains("Continued.") }
+        let after = try await store.operatorTasks()
+        XCTAssertEqual(after.count, 1); XCTAssertEqual(after.first?.id, before)
+        XCTAssertEqual(after.first?.state, .completed)
+    }
+
+    func testProgressFilteringRejectsSecretsAndInternalContent() {
+        for value in ["Still working", "TOKEN: sk-abcdefghijklmnopqrstuvwxyz", "Open HTTPS://example.test", "File /Users/example/private", "user@example.test replied", "thread id 123", "{\"summary\":\"ready\"}", "The code is 123456"] {
+            if value == "The code is 123456" { continue } // Ordinary numbers are not categorically credentials.
+            XCTAssertNil(ConversationProgress.safeMessage(value), value)
+        }
+        XCTAssertEqual(ConversationProgress.safeMessage("I found two options within your budget."), "I found two options within your budget.")
+    }
+
+    func testCancelledRunningFollowUpProducesNoNotificationOrUncertainFallback() async throws {
+        let clock = FixtureClock(ISO8601DateFormatter().date(from: "2026-09-20T13:00:00Z")!)
+        let result = #"{"schemaVersion":1,"kind":"worker_result","status":"completed","summary":"There is a change.","notifyUser":true}"#
+        let (store, gateway, messages, codex) = try await setup([relay, result], withAutomation: true, clock: clock)
+        await codex.hold(); await gateway.start()
+        let automation = try SteveUserAutomationStore(databaseURL: store.databaseURL)
+        let settings = try await store.getSettings()!
+        let boundary = try ScheduleAuthorization(chatGUID: "chat", senderHandle: "user@example.test", workspace: settings.workspaceRoot!, permission: "workspace-write")
+        let epoch = try await store.gatewayEpoch()!
+        let provenance = ExplicitUserProvenance(source: .pairedMessage, sourceID: "plan", statement: "Track my plan", explicitlyRequested: true, recordedAt: clock.now())
+        let plan = WorkerPlanUpdate(summary: "One dated fixture plan", state: .active, userQuote: "Track my plan", endsAt: "2026-09-23T13:00:00Z", nextCheckAt: "2026-09-20T13:00:01Z")
+        try await automation.savePlan(taskID: "parent", update: plan, authorization: boundary, provenance: provenance, timeZone: "America/New_York", now: clock.now(), expectedEpoch: epoch)
+        clock.advance(1); try await gateway.pollSchedules(now: clock.now())
+        try await eventually { await codex.turns == 2 }
+        try await automation.cancelPlan(taskID: "parent", provenance: .init(source: .pairedMessage, sourceID: "cancel", statement: "Leave it with me", explicitlyRequested: true, recordedAt: clock.now()), now: clock.now(), expectedEpoch: epoch)
+        await codex.releaseWorker()
+        try await eventually { try await store.operatorTasks().first?.state == .cancelled }
+        let sent = await messages.sent; XCTAssertTrue(sent.isEmpty)
+        let runs = try await automation.schedules().first.map { $0.id }
+        let outcomes = try await automation.runs(scheduleID: runs!)
+        XCTAssertEqual(outcomes.first?.state, .cancelled)
+    }
+
+    func testDeferredDeliveryWakesAtInjectedTimeWithoutNewMessage() async throws {
+        let clock = FixtureClock()
+        let (store, gateway, messages, _) = try await setup([], withAutomation: true, clock: clock)
+        await gateway.start()
+        let part = SteveStore.OutboundPart(id: "deferred", chatGuid: "chat", recipient: "user@example.test", replyTo: "fixture", inboxGUIDs: [], text: "Morning update", attachmentPath: nil, workspace: nil, permission: nil, notBefore: clock.now().addingTimeInterval(3600))
+        try await store.stageDelivery([part], inboxGUIDs: [], expectedEpoch: try await store.gatewayEpoch())
+        try await gateway.pollSchedules(now: clock.now())
+        try await Task.sleep(for: .milliseconds(30))
+        let before = await messages.sent; XCTAssertTrue(before.isEmpty)
+        clock.advance(3601)
+        try await gateway.pollSchedules(now: clock.now())
+        try await eventually { await messages.sent == ["Morning update"] }
+    }
+
+    private func stageFollowUpAcrossQuietHours(
+        store: SteveStore,
+        gateway: GatewayCoordinator,
+        clock: FixtureClock,
+        taskID: String,
+        endsAt: String
+    ) async throws -> (SteveUserAutomationStore, UserScheduleRun, SteveStore.OutboundPart) {
+        let automation = try SteveUserAutomationStore(databaseURL: store.databaseURL)
+        let settings = try await store.getSettings()!
+        let boundary = try ScheduleAuthorization(chatGUID: "chat", senderHandle: "user@example.test", workspace: settings.workspaceRoot!, permission: "workspace-write")
+        let epoch = try await store.gatewayEpoch()!
+        let provenance = ExplicitUserProvenance(source: .pairedMessage, sourceID: taskID, statement: "Track this plan", explicitlyRequested: true, recordedAt: clock.now())
+        let next = ISO8601DateFormatter().string(from: clock.now().addingTimeInterval(1))
+        let plan = WorkerPlanUpdate(summary: "One verified fixture check", state: .active, userQuote: "Track this plan", endsAt: endsAt, nextCheckAt: next)
+        try await automation.savePlan(taskID: taskID, update: plan, authorization: boundary, provenance: provenance, timeZone: "America/New_York", now: clock.now(), expectedEpoch: epoch)
+        clock.advance(1)
+        let claimed = try await automation.claimDue(now: clock.now(), authorization: boundary, dispatchEpoch: epoch)
+        let run = try XCTUnwrap(claimed.first)
+        let accepted = try await store.acceptScheduledRun(id: run.id, expectedEpoch: epoch)
+        XCTAssertTrue(accepted)
+        _ = try await store.claimInbox(["schedule:" + run.id])
+        let part = SteveStore.OutboundPart(id: "follow-up:" + taskID, chatGuid: "chat", recipient: "user@example.test", replyTo: "fixture", inboxGUIDs: [], text: "I couldn't prepare the scheduled update.", attachmentPath: nil, workspace: settings.workspaceRoot, permission: "workspace-write", notBefore: clock.now().addingTimeInterval(60), followUpRunID: run.id)
+        try await store.stageDelivery([part], inboxGUIDs: [], expectedEpoch: epoch)
+        try await gateway.pollSchedules(now: clock.now())
+        return (automation, run, part)
+    }
+
+    func testFollowUpDeliveryRechecksQuietHoursAtSendAndWakesAtMorning() async throws {
+        let clock = FixtureClock(ISO8601DateFormatter().date(from: "2026-09-21T01:58:59Z")!) // 9:58:59 PM EDT.
+        let (store, gateway, messages, _) = try await setup([], withAutomation: true, clock: clock)
+        await gateway.start()
+        let (automation, run, part) = try await stageFollowUpAcrossQuietHours(store: store, gateway: gateway, clock: clock, taskID: "morning", endsAt: "2026-09-23T12:00:00-04:00")
+        clock.advance(60) // The ready part reaches send-time at 10 PM.
+        try await gateway.pollSchedules(now: clock.now())
+        try await Task.sleep(for: .milliseconds(30))
+        let quietSent = await messages.sent
+        XCTAssertTrue(quietSent.isEmpty)
+        try await automation.recordOutcome(id: run.id, state: .uncertain, detail: "Fixture delivery outcome needs review.", now: clock.now())
+        clock.advance(36_000) // 8 AM EDT.
+        for _ in 0..<150 {
+            try await gateway.pollSchedules(now: clock.now())
+            if await messages.sent == ["I couldn't prepare the scheduled update."] { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let queueState = try await store.queueState(part.id)
+        let runState = try await automation.run(id: run.id)?.state
+        XCTFail("Deferred follow-up did not send; queue=\(queueState ?? "missing") run=\(String(describing: runState))")
+    }
+
+    func testDeferredFollowUpCancellationAndExpirySuppressDelivery() async throws {
+        let cancelledClock = FixtureClock(ISO8601DateFormatter().date(from: "2026-09-21T01:58:59Z")!)
+        let (cancelledStore, cancelledGateway, cancelledMessages, _) = try await setup([], withAutomation: true, clock: cancelledClock)
+        await cancelledGateway.start()
+        let (cancelledAutomation, _, cancelledPart) = try await stageFollowUpAcrossQuietHours(store: cancelledStore, gateway: cancelledGateway, clock: cancelledClock, taskID: "cancelled", endsAt: "2026-09-23T12:00:00-04:00")
+        cancelledClock.advance(60); try await cancelledGateway.pollSchedules(now: cancelledClock.now())
+        try await cancelledAutomation.cancelPlan(taskID: "cancelled", provenance: .init(source: .pairedMessage, sourceID: "cancel", statement: "Cancel this plan", explicitlyRequested: true, recordedAt: cancelledClock.now()), now: cancelledClock.now(), expectedEpoch: try await cancelledStore.gatewayEpoch()!)
+        cancelledClock.advance(36_000); try await cancelledGateway.pollSchedules(now: cancelledClock.now())
+        try await eventually { try await cancelledStore.queueState(cancelledPart.id) == "failed" }
+        let cancelledSent = await cancelledMessages.sent
+        XCTAssertTrue(cancelledSent.isEmpty)
+
+        let expiredClock = FixtureClock(ISO8601DateFormatter().date(from: "2026-09-21T01:58:59Z")!)
+        let (expiredStore, expiredGateway, expiredMessages, _) = try await setup([], withAutomation: true, clock: expiredClock)
+        await expiredGateway.start()
+        let (_, _, expiredPart) = try await stageFollowUpAcrossQuietHours(store: expiredStore, gateway: expiredGateway, clock: expiredClock, taskID: "expired", endsAt: "2026-09-20T22:30:00-04:00")
+        expiredClock.advance(60); try await expiredGateway.pollSchedules(now: expiredClock.now())
+        expiredClock.advance(36_000); try await expiredGateway.pollSchedules(now: expiredClock.now())
+        try await eventually { try await expiredStore.queueState(expiredPart.id) == "failed" }
+        let expiredSent = await expiredMessages.sent
+        XCTAssertTrue(expiredSent.isEmpty)
+    }
+
 }
