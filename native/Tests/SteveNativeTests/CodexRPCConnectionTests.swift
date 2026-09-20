@@ -325,6 +325,110 @@ final class CodexRPCConnectionTests: XCTestCase {
         CodexRPCConnection(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", script], responseTimeout: timeout, eventTimeout: timeout)
     }
 
+    private func instructionRefreshFixture(rejectFirstInjection: Bool = false, returnedID: String = "existing", sandbox: String = "readOnly") throws -> (CodexRPCConnection, URL) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let log = root.appendingPathComponent("requests.jsonl")
+        let quotedLog = "'" + log.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let rpc = connection(#"""
+        loaded=1
+        injections=0
+        while IFS= read -r line; do
+          printf '%s\n' "$line" >> \#(quotedLog)
+          id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+          [ -n "$id" ] || continue
+          method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p' | tr -d '\\')
+          result='{}'
+          case "$method" in
+            thread/loaded/list) if [ "$loaded" = 1 ]; then result='{"data":["existing"]}'; else result='{"data":[]}'; fi ;;
+            thread/read) result='{"thread":{"id":"existing","turns":[{"id":"earlier-turn","status":"completed"}]}}' ;;
+            thread/unsubscribe) loaded=0 ;;
+            thread/resume) loaded=1; result='{"thread":{"id":"\#(returnedID)"},"sandbox":{"type":"\#(sandbox)"},"serviceTier":"default"}' ;;
+            thread/inject_items)
+              injections=$((injections + 1))
+              if [ '\#(rejectFirstInjection)' = true ] && [ "$injections" = 1 ]; then
+                printf '{"id":%s,"error":{"code":-32601,"message":"unsupported injection"}}\n' "$id"
+                continue
+              fi ;;
+            turn/start) result='{"turn":{"id":"turn"}}' ;;
+          esac
+          printf '{"id":%s,"result":%s}\n' "$id" "$result"
+          if [ "$method" = turn/start ]; then
+            printf '%s\n' '{"method":"item/completed","params":{"threadId":"existing","turnId":"turn","item":{"id":"answer","type":"agentMessage","phase":"final_answer","text":"Done."}}}' '{"method":"turn/completed","params":{"threadId":"existing","turn":{"id":"turn","status":"completed"}}}'
+          fi
+        done
+        """#, timeout: 2)
+        return (rpc, log)
+    }
+
+    private func recordedRequests(_ log: URL) throws -> [[String: Any]] {
+        try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+        }
+    }
+
+    func testResumedInstructionRefreshPreservesThreadAndDoesNotRepeatUnchangedConfig() async throws {
+        let (rpc, log) = try instructionRefreshFixture()
+        defer { rpc.stop() }
+        let client = CodexAppServerClient(connection: rpc)
+        for instructions in ["Current worker contract", "Current worker contract", "Updated worker contract", "Updated worker contract"] {
+            try await client.resumeThread(threadID: "existing", cwd: "/fixture", permissionProfile: "read-only", model: "fixture", developerInstructions: instructions)
+        }
+        let requests = try recordedRequests(log)
+        let injections = requests.filter { $0["method"] as? String == "thread/inject_items" }
+        XCTAssertEqual(injections.count, 2)
+        for (request, instructions) in zip(injections, ["Current worker contract", "Updated worker contract"]) {
+            let params = try XCTUnwrap(request["params"] as? [String: Any])
+            XCTAssertEqual(params["threadId"] as? String, "existing")
+            let items = try XCTUnwrap(params["items"] as? [[String: Any]])
+            XCTAssertEqual(items.count, 1)
+            XCTAssertEqual(items.first?["role"] as? String, "developer")
+            let content = try XCTUnwrap(items.first?["content"] as? [[String: String]])
+            XCTAssertEqual(content.first?["type"], "input_text")
+            XCTAssertTrue(content.first?["text"]?.hasSuffix("\n\n" + instructions) == true)
+        }
+        let methods = requests.compactMap { $0["method"] as? String }
+        XCTAssertEqual(methods.filter { $0 == "thread/resume" }.count, 4)
+        XCTAssertEqual(methods.filter { $0 == "thread/unsubscribe" }.count, 2)
+        XCTAssertTrue(Set(methods).isDisjoint(with: ["thread/start", "thread/fork", "thread/rollback", "turn/start"]))
+    }
+
+    func testInstructionInjectionFailurePreventsExecutionAndIsNotCached() async throws {
+        let (rpc, log) = try instructionRefreshFixture(rejectFirstInjection: true)
+        defer { rpc.stop() }
+        let client = CodexAppServerClient(connection: rpc)
+        do {
+            try await client.resumeThread(threadID: "existing", cwd: "/fixture", permissionProfile: "read-only", model: "fixture", developerInstructions: "Current contract")
+            _ = try await client.runTurn(threadID: "existing", text: "Continue", model: "fixture", effort: "low")
+            XCTFail("Execution continued after instruction refresh failed")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("-32601"))
+            XCTAssertFalse(CodexSessionRecovery.shouldReplaceResumedThread(for: error))
+        }
+        for _ in 0..<2 {
+            try await client.resumeThread(threadID: "existing", cwd: "/fixture", permissionProfile: "read-only", model: "fixture", developerInstructions: "Current contract")
+        }
+        let methods = try recordedRequests(log).compactMap { $0["method"] as? String }
+        XCTAssertEqual(methods.filter { $0 == "thread/inject_items" }.count, 2)
+        XCTAssertFalse(methods.contains("turn/start"))
+    }
+
+    func testInstructionRefreshRequiresMatchingThreadAndVerifiedSandbox() async throws {
+        for (id, sandbox) in [("different", "readOnly"), ("existing", "dangerFullAccess")] {
+            let (rpc, log) = try instructionRefreshFixture(returnedID: id, sandbox: sandbox)
+            defer { rpc.stop() }
+            let client = CodexAppServerClient(connection: rpc)
+            do {
+                try await client.resumeThread(threadID: "existing", cwd: "/fixture", permissionProfile: "read-only", model: "fixture", developerInstructions: "Current contract")
+                XCTFail("Unverified task accepted")
+            } catch {}
+            let methods = try recordedRequests(log).compactMap { $0["method"] as? String }
+            XCTAssertFalse(methods.contains("thread/inject_items"))
+            XCTAssertFalse(methods.contains("turn/start"))
+        }
+    }
+
     func testLateControlResponseIsReadAfterTurnCompletion() async throws {
         let rpc = connection(#"""
         read -r first

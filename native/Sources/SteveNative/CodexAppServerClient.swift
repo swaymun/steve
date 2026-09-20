@@ -1502,8 +1502,10 @@ actor CodexAppServerClient {
         var configuration = params
         configuration.removeValue(forKey: "threadId")
         let fingerprint = try JSONSerialization.data(withJSONObject: configuration, options: [.sortedKeys])
-        if method == "thread/resume", let id = params["threadId"] as? String, threadConfigurations[id] != fingerprint {
-            try await unloadIdleThread(id)
+        var refreshInstructions = false
+        if method == "thread/resume", let id = params["threadId"] as? String {
+            refreshInstructions = threadConfigurations[id] != fingerprint
+            if refreshInstructions { try await unloadIdleThread(id) }
         }
         let deadline = Date().addingTimeInterval(5)
         var response: [String: Any]
@@ -1519,7 +1521,21 @@ actor CodexAppServerClient {
             }
         }
         if let sandbox = params["sandbox"] as? String { try Self.verifySandbox(response, requested: sandbox) }
-        if let id = (response["thread"] as? [String: Any])?["id"] as? String { threadConfigurations[id] = fingerprint }
+        guard let id = (response["thread"] as? [String: Any])?["id"] as? String, !id.isEmpty else { throw RPCError(message: "Codex did not return a thread id") }
+        if method == "thread/resume" {
+            guard id == params["threadId"] as? String else { throw RPCError(message: "Codex resumed a different task; execution was not started.") }
+            if refreshInstructions {
+                guard let instructions = params["developerInstructions"] as? String,
+                      !instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw RPCError(message: "Cannot refresh empty task instructions") }
+                // Resume changes configuration but may retain the old developer
+                // message in model history. Append the trusted current contract.
+                let text = "These are the current Steve application instructions, replacing earlier Steve application instructions. Preserve task history and the user's current authorization.\n\n" + instructions
+                _ = try await requestObject("thread/inject_items", params: ["threadId": id, "items": [
+                    ["type": "message", "role": "developer", "content": [["type": "input_text", "text": text]]]
+                ]])
+            }
+        }
+        threadConfigurations[id] = fingerprint
         return response
     }
 
