@@ -52,7 +52,7 @@ enum SteveControl {
             case "stop": try await runtime.setPaused(true)
             case "setup":
                 let agentOptions: Set<String> = ["model", "effort", "service-tier", "relay-model", "relay-effort", "relay-service-tier", "max-operators", "max-helpers"]
-                let allowed = Set(["workspace", "permission", "login", "pair", "tailscale-connect", "phone-access", "open-permission"])
+                let allowed = Set(["workspace", "permission", "login", "pair", "owner", "agent-name", "personality", "tailscale-connect", "phone-access", "open-permission"])
                     .union(agentOptions)
                 guard Set(request.options.keys).isSubset(of: allowed) else {
                     throw RPCError(message: "Unknown setup option; no changes were applied.")
@@ -66,6 +66,8 @@ enum SteveControl {
                 // Validate configuration choices before applying them. Account
                 // sign-in and pairing are resumable steps, not one transaction.
                 let snapshot = await runtime.snapshot()
+                _ = try SteveOnboarding.identity(name: request.options["agent-name"] ?? snapshot.settings.displayName, personality: request.options["personality"] ?? snapshot.settings.personality)
+                if let address = request.options["owner"] { _ = try SteveOnboarding.ownerAddress(address) }
                 if let value = request.options["permission"], !["read-only", "workspace-write", "danger-full-access"].contains(value) {
                     throw RPCError(message: "Choose read-only, workspace-write, or danger-full-access.")
                 }
@@ -102,6 +104,10 @@ enum SteveControl {
                 }
                 if let value = request.options["workspace"] { try await runtime.configureWorkspace(value); applied.append("workspace") }
                 if let value = request.options["permission"] { try await runtime.selectPermission(value); applied.append("permission") }
+                if request.options["agent-name"] != nil || request.options["personality"] != nil {
+                    try await runtime.configureIdentity(name: request.options["agent-name"], personality: request.options["personality"])
+                    applied.append(contentsOf: ["agent-name", "personality"].filter { request.options[$0] != nil })
+                }
                 let requestedAgentOptions = request.options.filter { agentOptions.contains($0.key) }
                 if !requestedAgentOptions.isEmpty {
                     try await runtime.configureAgentSettings(options: requestedAgentOptions)
@@ -110,6 +116,10 @@ enum SteveControl {
                 if request.options["login"] == "true" {
                     let login = try await runtime.loginStart()
                     values["authURL"] = login.authURL
+                }
+                if let address = request.options["owner"] {
+                    values["receiveAddress"] = try await runtime.configureOwner(address)
+                    applied.append("owner")
                 }
                 if request.options["pair"] == "true" {
                     let pair = try await runtime.createPairing()
@@ -124,7 +134,7 @@ enum SteveControl {
                 SteveSetupCheck(name: "codex_account", state: snapshot.status.connected ? "ready" : "needs_user_action", detail: snapshot.status.connected ? "Codex account connected." : "Run setup --login, then finish the returned URL in your browser."),
                 SteveSetupCheck(name: "workspace", state: snapshot.settings.workspaceRoot == nil ? "needs_user_action" : "ready", detail: snapshot.settings.workspaceRoot ?? "Choose a workspace with setup --workspace /absolute/path."),
                 SteveSetupCheck(name: "permissions", state: snapshot.settings.permissionProfile == nil ? "needs_user_action" : "ready", detail: snapshot.settings.permissionProfile ?? "Choose setup --permission read-only, workspace-write, or danger-full-access."),
-                SteveSetupCheck(name: "phone", state: snapshot.trustedConversation == nil ? "needs_user_action" : "ready", detail: snapshot.trustedConversation == nil ? "Run setup --pair and send the displayed code from the phone." : "An exact private Messages conversation is paired."),
+                phoneCheck(snapshot),
                 SteveSetupCheck(name: "operator", state: snapshot.paused ? "blocked" : "ready", detail: snapshot.paused ? "Paused. Run start to resume." : "Enabled.")
             ]
             let diagnostics = request.command == "doctor" || request.command == "setup"
@@ -152,6 +162,8 @@ enum SteveControl {
             }
             let state = readiness(checks)
             values.merge([
+                "agentName": snapshot.settings.displayName,
+                "personality": snapshot.settings.personality,
                 "relayModel": snapshot.settings.relayModel ?? "auto",
                 "relayEffort": snapshot.settings.relayEffort,
                 "relayServiceTier": snapshot.settings.relayServiceTier.rawValue,
@@ -162,6 +174,10 @@ enum SteveControl {
                 "maxHelpers": String(snapshot.settings.maxHelpersPerOperator),
                 "nativeHelpers": snapshot.nativeHelpersAvailable.map { $0 ? "available" : "unavailable" } ?? "unverified"
             ]) { _, current in current }
+            if let owner = snapshot.ownerSetup {
+                values["ownerAddress"] = owner.address
+                values["receiveAddress"] = owner.receiveAddress
+            }
             return SteveControlResponse(state: state, summary: snapshot.status.detail.isEmpty ? (snapshot.paused ? "Steve is paused." : "Steve is running.") : snapshot.status.detail, checks: checks, values: values, tasks: snapshot.tasks)
         } catch {
             return SteveControlResponse(state: "failed", summary: error.localizedDescription, values: applied.isEmpty ? [:] : ["applied": applied.joined(separator: ","), "nextStep": "These settings were saved before the later step failed. Run status and resume the remaining setup step."])
@@ -171,6 +187,16 @@ enum SteveControl {
     static func readiness(_ checks: [SteveSetupCheck]) -> String {
         checks.contains(where: { $0.required && $0.state == "blocked" }) ? "blocked" :
             checks.contains(where: { $0.required && $0.state != "ready" }) ? "needs_user_action" : "ready"
+    }
+
+    static func phoneCheck(_ snapshot: Snapshot) -> SteveSetupCheck {
+        if snapshot.trustedConversation != nil {
+            return .init(name: "phone", state: "ready", detail: "An exact private Messages conversation is connected.")
+        }
+        if let owner = snapshot.ownerSetup {
+            return .init(name: "phone", state: "needs_user_action", detail: "From \(owner.address), send a normal private iMessage to \(owner.receiveAddress). Your first request connects automatically; no code is needed.")
+        }
+        return .init(name: "phone", state: "needs_user_action", detail: "Choose the owner's iMessage address with setup --owner ADDRESS, then send a normal message to connect.")
     }
 
     static func computerUseChecks(installed: Bool) -> [SteveSetupCheck] {

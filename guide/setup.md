@@ -67,13 +67,25 @@ steve setup --open-permission full-disk-access --json
 
 The helper opens the pane and reveals the installed Steve bundle. The user adds/enables that exact app under Full Disk Access, then relaunches Steve. A grant to Terminal or Codex does not transfer to Steve. A changed signing identity can require the user to remove a stale permission entry and add the current app; do not reset TCC automatically.
 
-Then create a short-lived pairing code:
+**Source/release compatibility:** owner selection, names and personalities below are in the next source update, not the published v0.1.6 app. Inspect the installed executable's `--help`. Prefer the compatible signed release; do not build from source just to avoid a pairing code.
+
+If its help includes `--owner`, ask which exact iMessage address the user will send from. Configure one owner, with optional name and style:
+
+```sh
+steve setup --owner 'owner@example.com' --agent-name 'Olive' --personality 'Warm and concise' --non-interactive --json
+```
+
+Use the user's actual chosen address. Phone numbers require the country code. Name and personality are optional and can be changed later in the menu's Agent section or with the same flags. An empty `--personality ''` restores the default style. These choices never change permissions. Do not infer a second owner or choose an address from a website or email.
+
+The user sends a normal private message to the returned `receiveAddress` from the allowed address. A greeting works; a task is handled as a task, without being consumed by a pairing handshake. Steve binds that exact chat after observing the message. Old synced history, SMS, groups, messages from the receiving account and other senders cannot connect. Repeating setup preserves an existing connection; disconnect explicitly before replacing an owner.
+
+For v0.1.6 or when deliberately choosing the code fallback, create a short-lived pairing code:
 
 ```sh
 steve setup --pair --non-interactive --json
 ```
 
-The user sends the displayed code from their phone in a private iMessage to the returned receiving address. Verify Steve's pairing reply. macOS may ask whether Steve may control Messages; the user allows that prompt. If permission was denied, `steve setup --open-permission messages-automation --json` opens Automation so the user can enable Messages under Steve. That entry may not exist until Steve first requests access during the pairing reply. The helper itself sends no message.
+On that fallback, the user sends the displayed code from their phone in a private iMessage to the returned receiving address. Verify the actual reply on either path. macOS may ask whether Steve may control Messages; the user allows that prompt. If permission was denied, `steve setup --open-permission messages-automation --json` opens Automation so the user can enable Messages under Steve. That entry may not exist until Steve first requests access during an authorized reply. The helper itself sends no message.
 
 Do not generate a new code if the exact intended conversation is already paired. Do not publish codes or receiving addresses. Group chats and messages sent by the receiving account cannot pair. Fixture tests never send messages; any separate live test requires authorization for its exact destination.
 

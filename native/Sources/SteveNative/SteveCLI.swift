@@ -12,6 +12,7 @@ enum SteveCLI {
       steve video stop RECORDING_ID [--json]
       steve video cancel [--json]
       setup [--workspace /absolute/path] [--permission PROFILE]
+            [--owner ADDRESS] [--agent-name NAME] [--personality TEXT]
             [--model ID] [--effort EFFORT] [--service-tier standard|fast]
             [--relay-model auto|ID] [--relay-effort EFFORT] [--relay-service-tier standard|fast]
             [--max-operators 1...4] [--max-helpers 0...2]
@@ -23,7 +24,9 @@ enum SteveCLI {
 
     Open Steve.app first. Commands use the running app's permissions and session.
     setup applies only explicit choices. --login returns the official sign-in URL;
-    --pair returns a one-time code to send in Messages. Neither bypasses human login
+    --owner ADDRESS allows one owner's iMessage address; send a normal message to connect.
+    --agent-name NAME and --personality TEXT customize the assistant (optional).
+    --pair is the legacy one-time-code fallback. These do not bypass human login
     or macOS permission prompts. --non-interactive never waits for terminal input.
     --open-permission opens Settings for a human grant; use it separately from
     other setup options. Ordinary setup and doctor do not open Settings.
@@ -59,6 +62,12 @@ enum SteveCLI {
             switch arg {
             case "--json": json = true; interactive = false
             case "--non-interactive": interactive = false
+            case "--owner", "--agent-name", "--personality":
+                guard command == "setup", index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--"), request.options[String(arg.dropFirst(2))] == nil else {
+                    throw RPCError(message: "\(arg) requires one value on setup.")
+                }
+                index += 1
+                request.options[String(arg.dropFirst(2))] = arguments[index]
             case "--demonstration", "--audio":
                 guard command == "video", request.options["action"] == "start" else { throw RPCError(message: "\(arg) is a video start option.") }
                 request.options[String(arg.dropFirst(2))] = "true"
@@ -107,6 +116,12 @@ enum SteveCLI {
             var (request, _, interactive) = try parse(arguments)
             if interactive && request.command == "setup" && request.options.isEmpty && isatty(STDIN_FILENO) == 1 {
                 print("Steve keeps existing settings. Press Return to leave a choice unchanged.")
+                print("Your iMessage email or phone with country code: ", terminator: "")
+                if let value = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { request.options["owner"] = value }
+                print("Agent name (optional): ", terminator: "")
+                if let value = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { request.options["agent-name"] = value }
+                print("Personality, such as warm and concise (optional): ", terminator: "")
+                if let value = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { request.options["personality"] = value }
                 print("Workspace (absolute path): ", terminator: "")
                 if let value = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { request.options["workspace"] = value }
                 print("Permission (read-only / workspace-write / danger-full-access): ", terminator: "")

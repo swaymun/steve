@@ -206,6 +206,53 @@ actor SteveStore {
         try getJSON(TrustedConversation.self, key: "trusted_conversation")
     }
 
+    func ownerSetup() throws -> SteveOwnerSetup? {
+        try getJSON(SteveOwnerSetup.self, key: "owner_setup")
+    }
+
+    func saveOwnerSetup(_ value: SteveOwnerSetup?) throws {
+        try connection.transaction(.immediate) {
+            if let value {
+                if let trusted = try trustedConversation(), normalizeHandle(trusted.senderHandle) != value.address {
+                    throw RPCError(message: "Disconnect the current conversation before choosing a different owner.")
+                }
+                try putJSON(value, key: "owner_setup")
+                try checkpoint(value.afterRowID)
+            }
+            else { try connection.run("DELETE FROM settings WHERE key = ?", "owner_setup") }
+            try savePairingChallenge(nil)
+        }
+    }
+
+    func bindOwner(_ message: SteveInboundMessage, expected: SteveOwnerSetup) throws -> Bool {
+        var bound = false
+        try connection.transaction(.immediate) {
+            guard try trustedConversation() == nil, try ownerSetup() == expected, expected.accepts(message) else { return }
+            try saveTrustedConversation(.init(chatGuid: message.chatGuid, senderHandle: expected.address))
+            try savePairingChallenge(nil)
+            bound = true
+        }
+        return bound
+    }
+
+    func bindPairing(_ message: SteveInboundMessage, expected: PairingChallenge, owner: SteveOwnerSetup?) throws -> Bool {
+        var bound = false
+        try connection.transaction(.immediate) {
+            let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard try pairingChallenge() == expected, try ownerSetup() == owner,
+                  expected.expiresAtMs > UInt64(Date().timeIntervalSince1970 * 1_000),
+                  !message.isFromMe, !message.isGroup, !message.chatGuid.isEmpty,
+                  message.service?.caseInsensitiveCompare("iMessage") == .orderedSame,
+                  !normalizeHandle(message.senderHandle).isEmpty,
+                  owner == nil || owner?.address == normalizeHandle(message.senderHandle),
+                  [expected.code.lowercased(), "/pair " + expected.code.lowercased()].contains(text) else { return }
+            try saveTrustedConversation(.init(chatGuid: message.chatGuid, senderHandle: normalizeHandle(message.senderHandle)))
+            try savePairingChallenge(nil)
+            bound = true
+        }
+        return bound
+    }
+
     func pairingChallenge() throws -> PairingChallenge? {
         try getJSON(PairingChallenge.self, key: "pairing_challenge")
     }

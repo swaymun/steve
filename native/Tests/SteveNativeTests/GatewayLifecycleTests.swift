@@ -157,6 +157,44 @@ final class GatewayLifecycleTests: XCTestCase {
         for _ in 0..<150 { if try await condition() { return }; try await Task.sleep(for: .milliseconds(10)) }
         XCTFail("Condition did not become true")
     }
+    func testConfiguredOwnerConnectsWithFirstOrdinaryTaskWithoutCannedWelcome() async throws {
+        let (store, gateway, messages, codex) = try await setup([relay, worker, """
+        {"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Observed fixture result"],"attachments":[]}
+        """])
+        try await store.saveTrustedConversation(nil)
+        let stored = try await store.getSettings()
+        var settings = try XCTUnwrap(stored)
+        settings.displayName = "Olive"; settings.personality = "Warm and concise"
+        try await store.saveSettings(settings)
+        await gateway.start()
+        try await gateway.configureOwner(address: "user@example.test", receiveAddress: "agent@example.test")
+        let original = try await store.ownerSetup()
+        try await gateway.configureOwner(address: "user@example.test", receiveAddress: "agent@example.test")
+        let repeated = try await store.ownerSetup()
+        XCTAssertEqual(original, repeated, "Repeated setup must preserve the waiting boundary")
+        var first = inbound("first-ordinary-task", text: "Open example.com.")
+        first.sentAt = Date()
+        first.service = "iMessage"
+        let accepted = await gateway.receive(first)
+        XCTAssertTrue(accepted)
+        try await eventually { await messages.sent.contains("Observed fixture result") }
+        let trusted = try await store.trustedConversation()
+        let sent = await messages.sent
+        let inputs = await codex.inputs
+        let instructions = await codex.threadInstructions
+        XCTAssertEqual(trusted?.chatGuid, first.chatGuid)
+        XCTAssertEqual(sent, ["Observed fixture result"], "A task must not be swallowed by a fixed pairing introduction")
+        XCTAssertTrue(inputs.first?.contains("FIRST_OWNER_MESSAGE: true") == true)
+        XCTAssertTrue(inputs.first?.contains("Open example.com.") == true)
+        XCTAssertTrue(instructions.allSatisfy { $0.text.contains("Olive") && $0.text.contains("Warm and concise") })
+        do {
+            try await gateway.configureOwner(address: "other@example.test", receiveAddress: "agent@example.test")
+            XCTFail("Replaced a connected owner without disconnecting")
+        } catch {}
+        let retained = try await store.trustedConversation()
+        XCTAssertEqual(retained?.senderHandle, "user@example.test")
+    }
+
     func testIntakeWriteFailureReconnectsBeforeCheckpointCanSkipTheMessage() async throws {
         let (store, gateway, messages, codex) = try await setup([])
         try await store.savePaused(true)
@@ -856,7 +894,7 @@ final class GatewayLifecycleTests: XCTestCase {
         await gateway.receive(inbound("current-status", text: "status"))
         try await eventually { await messages.sent.count == 2 }
         let sent = await messages.sent
-        XCTAssertEqual(sent, ["Steve is ready. Nothing is waiting.", "History: 4 earlier requests failed."])
+        XCTAssertEqual(sent, ["Fixture is ready. Nothing is waiting.", "History: 4 earlier requests failed."])
         let counts = try await store.workCounts(excludingGUID: "current-status")
         let turns = await codex.turns
         XCTAssertEqual(counts.failed, 4, "Status must preserve failure history, not erase or retry it")
@@ -874,7 +912,7 @@ final class GatewayLifecycleTests: XCTestCase {
         await gateway.receive(inbound("review-status", text: "status"))
         try await eventually { await messages.sent.count == 1 }
         let sent = await messages.sent
-        XCTAssertTrue(sent[0].hasPrefix("Steve needs attention."))
+        XCTAssertTrue(sent[0].hasPrefix("Fixture needs attention."))
         XCTAssertTrue(sent[0].contains("needs review"))
         XCTAssertFalse(sent[0].contains("Nothing is waiting."))
         let outcome = try await store.queueState("inbound:unconfirmed")
@@ -921,7 +959,7 @@ final class GatewayLifecycleTests: XCTestCase {
         let otherID = await other.pendingApproval()!.id
         await other.receive(inbound("pause-connect", text: "/stop"))
         try await eventually { await otherCodex.approvalDecision == .cancel }
-        try await eventually { await messages.sent.joined().contains("Steve is paused") }
+        try await eventually { await messages.sent.joined().contains("Fixture is paused") }
         do { try await other.openConnectionSetup(id: otherID) { _ in XCTFail("Stale opener invoked"); return false }; XCTFail("URL survived pause") } catch {}
         await other.stop()
     }

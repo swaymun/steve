@@ -54,6 +54,33 @@ final class SteveControlTests: XCTestCase {
         return CodexRPCConnection(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", script], responseTimeout: 2)
     }
 
+    func testIdentityPreservesAccessAndDisconnectRemovesOwnerAuthorization() async throws {
+        let (root, store, runtime, _) = try await settingsRuntime()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await store.saveGatewayEpoch("existing-boundary")
+        try await store.saveOwnerSetup(.init(id: "owner", address: "owner@example.com", receiveAddress: "agent@example.com", afterRowID: 3, configuredAt: Date()))
+        try await store.saveTrustedConversation(.init(chatGuid: "existing-chat", senderHandle: "owner@example.com"))
+        try await runtime.configureIdentity(name: "Olive", personality: "Brief and warm")
+        let configured = try await store.getSettings()
+        let epoch = try await store.gatewayEpoch()
+        let trusted = try await store.trustedConversation()
+        XCTAssertEqual(configured?.displayName, "Olive")
+        XCTAssertEqual(configured?.personality, "Brief and warm")
+        XCTAssertEqual(configured?.permissionProfile, ":workspace-write")
+        XCTAssertEqual(configured?.workspaceRoot, root.path)
+        XCTAssertEqual(configured?.model, "fixture-model")
+        XCTAssertEqual(epoch, "existing-boundary")
+        XCTAssertEqual(trusted?.chatGuid, "existing-chat")
+        try await runtime.disconnectPhone()
+        let ownerAfter = try await store.ownerSetup()
+        let trustedAfter = try await store.trustedConversation()
+        XCTAssertNil(ownerAfter); XCTAssertNil(trustedAfter)
+        let settingsAfter = try await store.getSettings()
+        XCTAssertEqual(settingsAfter?.displayName, "Olive")
+        XCTAssertEqual(settingsAfter?.workspaceRoot, root.path)
+        await runtime.stop()
+    }
+
     func testModelAndEffortChangeApplyWithoutInvalidatingPermissionBoundary() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

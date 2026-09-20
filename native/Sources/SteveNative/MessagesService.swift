@@ -12,6 +12,9 @@ struct SteveInboundMessage: Codable, Sendable, Equatable {
     let replyToGuid: String?
     var rowID: Int64? = nil
     var approvalID: String? = nil
+    var sentAt: Date? = nil
+    var beginsConversation: Bool? = nil
+    var service: String? = nil
 }
 
 struct MessagesAccount: Sendable, Equatable {
@@ -186,7 +189,9 @@ actor MessagesService {
             isGroup: isGroup,
             attachmentPaths: attachmentPaths,
             replyToGuid: message.replyToGUID,
-            rowID: message.rowID
+            rowID: message.rowID,
+            sentAt: message.date,
+            service: message.service
         )
     }
 

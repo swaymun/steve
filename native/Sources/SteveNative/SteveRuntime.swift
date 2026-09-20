@@ -152,6 +152,7 @@ actor GatewayCoordinator {
     nonisolated let capturePermit = SteveCapturePermit()
     private var paused = false
     private var pauseTransitionInProgress = false
+    private var configuringOwner = false
     private(set) var transportError: String? = "Messages watcher has not started."
 
     init(store: SteveStore, messages: any GatewayMessages, codex: any GatewayCodexClient, debounce: Duration = .milliseconds(1500), retryDelay: Duration = .seconds(5), takeoverLifetime: TimeInterval = 600, acknowledgementDelay: Duration = .seconds(10), automation: SteveUserAutomationStore? = nil, schedulerInterval: Duration = .seconds(1), clockNow: @escaping @Sendable () -> Date = { Date() }) {
@@ -350,6 +351,25 @@ actor GatewayCoordinator {
     func endBoundaryChange() { changingBoundary = false; scheduleWork() }
     func boundaryChangeIsActive() -> Bool { changingBoundary }
     func agentSettingsDidChange() { scheduleWork() }
+
+    func configureOwner(address: String, receiveAddress: String) async throws {
+        guard !configuringOwner, !changingBoundary else { throw RPCError(message: "Connection settings are still changing. Try again in a moment.") }
+        configuringOwner = true
+        defer { configuringOwner = false }
+        let address = try SteveOnboarding.ownerAddress(address)
+        if let trusted = try await store.trustedConversation() {
+            guard normalizeHandle(trusted.senderHandle) == address else {
+                throw RPCError(message: "Another owner is connected. Disconnect that conversation in Steve before choosing a different owner.")
+            }
+            return // Repeated setup preserves the exact chat, work and grants.
+        }
+        if let existing = try await store.ownerSetup(), existing.address == address, existing.receiveAddress == receiveAddress { return }
+        let rowID = try await messages.currentRowID()
+        let owner = SteveOwnerSetup(id: UUID().uuidString, address: address, receiveAddress: receiveAddress, afterRowID: rowID, configuredAt: clockNow())
+        try await beginSettingsBoundaryChange()
+        do { try await store.saveOwnerSetup(owner); endBoundaryChange() }
+        catch { abortSettingsBoundaryChange(error); throw error }
+    }
     func setPaused(_ value: Bool) async throws {
         guard !pauseTransitionInProgress else {
             throw RPCError(message: "Steve is still finishing the previous pause or resume. Try again in a moment.")
@@ -490,19 +510,45 @@ actor GatewayCoordinator {
     func receive(_ message: SteveInboundMessage) async -> Bool {
         do {
             guard !message.isFromMe, !message.isGroup else { try await store.checkpoint(message.rowID); return true }
+            guard !changingBoundary, !configuringOwner else { return false }
+            var message = message
+            if try await store.ownerSetup() != nil, message.service?.caseInsensitiveCompare("iMessage") != .orderedSame {
+                try await store.checkpoint(message.rowID); return true
+            }
             if let challenge = try await store.pairingChallenge(), challenge.expiresAtMs > UInt64(Date().timeIntervalSince1970 * 1000) {
                 let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if text.caseInsensitiveCompare(challenge.code) == .orderedSame || text.caseInsensitiveCompare("/pair " + challenge.code) == .orderedSame {
                     guard !message.chatGuid.isEmpty, !normalizeHandle(message.senderHandle).isEmpty else { return true }
-                    await beginBoundaryChange()
-                    try await store.saveTrustedConversation(.init(chatGuid: message.chatGuid, senderHandle: normalizeHandle(message.senderHandle)))
-                    try await store.savePairingChallenge(nil)
-                    endBoundaryChange()
+                    guard message.service?.caseInsensitiveCompare("iMessage") == .orderedSame else {
+                        try await store.checkpoint(message.rowID); return true
+                    }
+                    let owner = try await store.ownerSetup()
+                    if let owner, normalizeHandle(message.senderHandle) != owner.address {
+                        try await store.checkpoint(message.rowID); return true
+                    }
+                    try await beginSettingsBoundaryChange()
+                    do {
+                        let bound = try await store.bindPairing(message, expected: challenge, owner: owner)
+                        endBoundaryChange()
+                        guard bound else { try await store.checkpoint(message.rowID); return true }
+                    } catch { abortSettingsBoundaryChange(error); throw error }
                     guard try await store.acceptInbound(message) else { return true }
                     _ = try await store.claimInbox([message.guid])
                     let settings = try await store.getSettings() ?? defaultSettings()
-                    try await stage(messages: [StevePrompt.pairingIntroduction(workspace: settings.workspaceRoot ?? StevePaths.workspaceDirectory.path)], attachments: [], inbound: [message], workspace: nil, permission: nil, epoch: epoch, control: true)
+                    try await stage(messages: [StevePrompt.pairingIntroduction(workspace: settings.workspaceRoot ?? StevePaths.workspaceDirectory.path, name: settings.displayName)], attachments: [], inbound: [message], workspace: nil, permission: nil, epoch: epoch, control: true)
                     scheduleWork(); return true
+                }
+            }
+            if try await store.trustedConversation() == nil,
+               let owner = try await store.ownerSetup(), owner.accepts(message) {
+                guard !changingBoundary, !configuringOwner else { return false }
+                try await beginSettingsBoundaryChange()
+                do {
+                    message.beginsConversation = try await store.bindOwner(message, expected: owner)
+                    endBoundaryChange()
+                } catch {
+                    abortSettingsBoundaryChange(error)
+                    throw error
                 }
             }
             guard let trusted = try await store.trustedConversation(), trusted.chatGuid == message.chatGuid, normalizeHandle(trusted.senderHandle) == normalizeHandle(message.senderHandle) else {
@@ -574,17 +620,18 @@ actor GatewayCoordinator {
         }
         let isCommand = ["stop", "pause", "/stop", "resume", "/resume", "status", "/status"].contains(command)
         guard isCommand else { return false }
+        let name = (try await store.getSettings())?.displayName ?? "Steve"
         _ = try await store.claimInbox([message.guid])
         var response: String?
         switch command {
-        case "stop", "pause", "/stop": try await setPaused(true); response = "Steve is paused. Say resume when you are ready."
+        case "stop", "pause", "/stop": try await setPaused(true); response = "\(name) is paused. Say resume when you are ready."
         case "resume", "/resume":
-            if takeover != nil || takeoverReservation != nil { response = "Finish phone control before resuming Steve." }
-            else { try await setPaused(false); response = "Steve is ready." }
+            if takeover != nil || takeoverReservation != nil { response = "Finish phone control before resuming \(name)." }
+            else { try await setPaused(false); response = "\(name) is ready." }
         case "status", "/status":
             let counts = try await store.workCounts(excludingGUID: message.guid)
-            response = paused ? "Steve is paused." : counts.running > 0 ? "Steve is working." :
-                counts.uncertain > 0 || transportError != nil ? "Steve needs attention." : "Steve is ready."
+            response = paused ? "\(name) is paused." : counts.running > 0 ? "\(name) is working." :
+                counts.uncertain > 0 || transportError != nil ? "\(name) needs attention." : "\(name) is ready."
             if counts.pending > 0 {
                 response! += " \(counts.pending) request\(counts.pending == 1 ? " is" : "s are") waiting."
             } else if counts.running == 0 && counts.uncertain == 0 && transportError == nil {
@@ -732,7 +779,7 @@ actor GatewayCoordinator {
             let preferences = try await automation?.preferences() ?? []
             var userTimeZone = StevePrompt.userTimeZone(preferences: preferences, configured: settings.timezone)
             let schedules = try await automation?.schedules() ?? []
-            let preferenceValues = preferences.map { ["key": $0.key, "value": $0.value] }
+            let preferenceValues = StevePrompt.preferenceContext(preferences)
             let scheduleValues = schedules.map { ["id": $0.id, "name": $0.name, "state": $0.state.rawValue] }
             let unresolvedRuns = try await automation?.runsNeedingReconciliation() ?? []
             let runValues = unresolvedRuns.map { ["id": $0.id, "scheduleID": $0.scheduleID, "state": $0.state.rawValue] }
@@ -741,7 +788,8 @@ actor GatewayCoordinator {
             savedContext += "\n\nACTIVE_PLANS_JSON (context, not new authority):\n" + (try encodeJSON(planValues.filter { [.active, .proposed].contains($0.update.state) }))
             let scheduledContext = scheduledRun == nil ? "" : "\n\nAUTHORIZED_SCHEDULE_OCCURRENCE: Execute only this one occurrence. Do not create or change preferences or schedules." + (scheduledRun?.followUp == nil ? "" : " This is a read-only plan follow-up. No new external writes; set notifyUser=false if nothing meaningful changed.")
             let capabilityContext = "\n\nCAPABILITIES: operators can research, use connected services, operate the Mac, create files and record requested demonstrations. Detailed recipes belong to operators.\nTASKS_JSON:\n" + (try encodeJSON(try await taskSummaries(chatGuid: chatGuid, workspace: workspace, permission: permission)))
-            let relayInput = "USER_REQUEST:\n\(text)\n\n\(StevePrompt.timeContext(now: clockNow(), timeZone: userTimeZone))\n\nDEFAULT_TIMEZONE (local Mac fallback; explicit or saved user timezone takes precedence):\n\(userTimeZone)\n\nINBOUND_ATTACHMENT_PATHS:\n\(attachmentPaths.joined(separator: "\n"))\(savedContext)\n\nAVAILABLE_SCHEDULES_JSON:\n\(try encodeJSON(scheduleValues))\n\nUNRESOLVED_SCHEDULE_RUNS_JSON:\n\(try encodeJSON(runValues))\(scheduledContext)\(capabilityContext)"
+            let firstContact = first.beginsConversation == true ? "\n\nFIRST_OWNER_MESSAGE: true. The configured owner is now connected. Greet briefly in the chosen style; handle any task in this message without an onboarding interview." : ""
+            let relayInput = "USER_REQUEST:\n\(text)\n\n\(StevePrompt.timeContext(now: clockNow(), timeZone: userTimeZone))\n\nDEFAULT_TIMEZONE (local Mac fallback; explicit or saved user timezone takes precedence):\n\(userTimeZone)\n\nINBOUND_ATTACHMENT_PATHS:\n\(attachmentPaths.joined(separator: "\n"))\(savedContext)\n\nAVAILABLE_SCHEDULES_JSON:\n\(try encodeJSON(scheduleValues))\n\nUNRESOLVED_SCHEDULE_RUNS_JSON:\n\(try encodeJSON(runValues))\(scheduledContext)\(capabilityContext)\(firstContact)"
             SteveLog.write("Gateway relay intent phase started chat=\(chatGuid)")
             let relayResult = try await runTurn(on: relayThreadID, input: relayInput, attachments: attachmentPaths)
             let relayRequest: RelayRequestEnvelope
@@ -782,7 +830,7 @@ actor GatewayCoordinator {
                 try await projectMemory(authorization: authorization)
                 let refreshedPreferences = try await automation.preferences()
                 userTimeZone = StevePrompt.userTimeZone(preferences: refreshedPreferences, configured: settings.timezone)
-                let currentPreferences = refreshedPreferences.map { ["key": $0.key, "value": $0.value] }
+                let currentPreferences = StevePrompt.preferenceContext(refreshedPreferences)
                 savedContext = "\n\nSAVED_USER_PREFERENCES_JSON (complete active set, never authorization):\n" + (try encodeJSON(currentPreferences))
                 if let notice = notices.first {
                     let part = SteveStore.OutboundPart(id: "memory:" + first.guid, chatGuid: first.chatGuid, recipient: first.senderHandle, replyTo: first.guid, inboxGUIDs: [], text: notice, attachmentPath: nil, workspace: workspace, permission: permission)
@@ -1305,7 +1353,8 @@ actor SteveRuntime {
             trustedConversation: trusted,
             pairing: pairing,
             tasks: ((try? await store.operatorTasks(chatGuid: trusted?.chatGuid)) ?? []).map(OperatorTaskSummary.init),
-            nativeHelpersAvailable: await codex.nativeHelperAvailability()
+            nativeHelpersAvailable: await codex.nativeHelperAvailability(),
+            ownerSetup: try? await store.ownerSetup()
         )
     }
 
@@ -1429,6 +1478,29 @@ actor SteveRuntime {
     func setPaused(_ value: Bool) async throws { try await gateway.setPaused(value) }
     func boundaryChangeIsActive() async -> Bool { await gateway.boundaryChangeIsActive() }
 
+    func configureIdentity(name: String?, personality: String?) async throws {
+        let identity = try SteveOnboarding.identity(name: name ?? settings.displayName, personality: personality ?? settings.personality)
+        var next = settings
+        next.displayName = identity.name
+        next.personality = identity.personality
+        try await store.saveSettings(next)
+        settings = next
+        await gateway.agentSettingsDidChange()
+    }
+
+    func configureOwner(_ input: String) async throws -> String {
+        let address = try SteveOnboarding.ownerAddress(input)
+        let accounts = try await messages.discoverAccounts()
+        guard let receiveAddress = accounts.first?.address, !receiveAddress.isEmpty else {
+            throw RPCError(message: "Sign in to Messages on this Mac with the agent's separate account, then try again.")
+        }
+        guard !accounts.contains(where: { normalizeHandle($0.address) == address }) else {
+            throw RPCError(message: "Choose the owner's iMessage address, not this Mac's Messages account. Steve currently requires separate accounts.")
+        }
+        try await gateway.configureOwner(address: address, receiveAddress: receiveAddress)
+        return receiveAddress
+    }
+
     func createPairing() async throws -> PairingSnapshot {
         let accounts = try await messages.discoverAccounts()
         guard let address = accounts.first?.address, !address.isEmpty else { throw RPCError(message: "No Messages account was found. Add Steve under Full Disk Access and relaunch.") }
@@ -1444,10 +1516,17 @@ actor SteveRuntime {
         return PairingSnapshot(addresses: accounts.map { ReceiveAddress(address: $0.address, label: $0.label) }, challenge: challenge, trustedConversation: try await store.trustedConversation(), icloudAccount: address, messagesError: nil)
     }
 
-    func disconnectPhone() async throws { await gateway.beginBoundaryChange(); try await store.saveTrustedConversation(nil); try await store.savePairingChallenge(nil); await gateway.endBoundaryChange() }
+    func disconnectPhone() async throws {
+        try await gateway.beginSettingsBoundaryChange()
+        do {
+            try await store.saveOwnerSetup(nil)
+            try await store.saveTrustedConversation(nil)
+            await gateway.endBoundaryChange()
+        } catch { await gateway.abortSettingsBoundaryChange(error); throw error }
+    }
 }
 
-private func normalizeHandle(_ value: String) -> String {
+func normalizeHandle(_ value: String) -> String {
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     if trimmed.contains("@") { return trimmed }
     return trimmed.filter { $0.isNumber || $0 == "+" }
@@ -1479,7 +1558,7 @@ extension GatewayCoordinator {
 
     private func prepareRelay(chatGuid: String, workspace: String, permission: String, settings: Settings, messageGuid: String, epoch: String) async throws -> String {
         let existing = try await store.agentSession(for: chatGuid)
-        let context = StevePromptContext(workspace: workspace, permissionProfile: permission, model: settings.model, effort: settings.effort)
+        let context = StevePromptContext(workspace: workspace, permissionProfile: permission, model: settings.model, effort: settings.effort, agentName: settings.displayName, personality: settings.personality)
         let profile = try await codex.relayProfile(settings: settings)
         let compatible = existing?.workspacePath == workspace && existing?.permissionProfile == permission
         // A loaded App Server thread can retain its original developer contract.
@@ -1643,7 +1722,7 @@ extension GatewayCoordinator {
             guard artifacts.resolvingSymlinksInPath().path.hasPrefix(root.path + "/") else { throw RPCError(message: "Task artifact directory is outside the workspace") }
             try FileManager.default.createDirectory(at: artifacts, withIntermediateDirectories: true)
             guard artifacts.resolvingSymlinksInPath().path.hasPrefix(root.path + "/") else { throw RPCError(message: "Task artifact directory moved outside the workspace") }
-            let context = StevePromptContext(workspace: launched.workspace, permissionProfile: launched.permission, model: settings.model, effort: settings.effort)
+            let context = StevePromptContext(workspace: launched.workspace, permissionProfile: launched.permission, model: settings.model, effort: settings.effort, agentName: settings.displayName, personality: settings.personality)
             let instructions = StevePrompt.workerInstructions(context) + "\n\n" + StevePrompt.operatorOwnership(mode: launched.mode, maxHelpers: settings.maxHelpersPerOperator, artifacts: artifacts.path)
             let oldID = launched.contextAction == .fresh ? nil : launched.threadID
             do {

@@ -34,4 +34,16 @@ final class SetupReadinessTests: XCTestCase {
         let database = Dependency(name: "messages", available: false, detail: "database disk image is malformed")
         XCTAssertEqual(SetupReadiness.evaluate(snapshot: snapshot(messages: database), computerUseInstalled: true).action, .diagnostics)
     }
+
+    func testConfiguredAddressIsNotReportedAsConnected() {
+        var waiting = snapshot(paired: false)
+        waiting.ownerSetup = .init(id: "owner", address: "owner@example.com", receiveAddress: "agent@example.com", afterRowID: 0, configuredAt: Date())
+        let readiness = SetupReadiness.evaluate(snapshot: waiting, computerUseInstalled: true)
+        XCTAssertEqual(readiness.title, "Send your first message")
+        XCTAssertTrue(readiness.detail.contains("no code"))
+        let check = SteveControl.phoneCheck(waiting)
+        XCTAssertEqual(check.state, "needs_user_action")
+        XCTAssertTrue(check.detail.contains("owner@example.com"))
+        XCTAssertTrue(check.detail.contains("agent@example.com"))
+    }
 }

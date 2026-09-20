@@ -34,7 +34,10 @@ struct SetupReadiness: Equatable, Sendable {
                 : .init(title: "Messages needs attention", detail: "Open diagnostics for the current Messages error.", actionTitle: "Open Diagnostics", action: .diagnostics)
         }
         if snapshot.trustedConversation == nil {
-            return .init(title: "Pair iMessage", detail: "Connect the one private conversation allowed to send tasks.", actionTitle: "Connect Phone", action: .connectPhone)
+            if let owner = snapshot.ownerSetup {
+                return .init(title: "Send your first message", detail: "From \(owner.address), text \(owner.receiveAddress). A greeting or a task connects you; no code is needed.", actionTitle: "Connection Details", action: .connectPhone)
+            }
+            return .init(title: "Choose your iMessage address", detail: "Only this owner will be allowed to send tasks.", actionTitle: "Connect iMessage", action: .connectPhone)
         }
         if !computerUseInstalled {
             return .init(title: "Enable Computer Use", detail: "Install native Computer Use through Codex for browser and app tasks.", actionTitle: "Open Setup Guide", action: .openComputerUseGuide)

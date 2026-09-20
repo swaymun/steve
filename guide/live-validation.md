@@ -6,11 +6,27 @@ For each scenario, record the installed build identity, start/end time, observed
 
 ## Validation coverage
 
-Connected email and calendar reads passed live checks with both operator models in v0.1.3. Sending email, changing calendar events, completing reservations, and making purchases were not exercised. Received videos were decoded and reviewed on a Mac, and the user confirmed playback in their Messages chat. Physical iPhone Safari control still needs full device acceptance. These are gaps in test coverage, not confirmed product defects or restrictions on authorized tasks.
+The v0.1.6 cycle exercised self-owned email replies and calendar writes, reminders, memory, cancellation, browser tasks, document delivery, and staged shopping without a purchase. Its exact released build passed Luna PDF/browser checks and independent Astra browser/calendar checks. Earlier videos were decoded and reviewed on a Mac, and the user confirmed playback in their Messages chat; video and physical iPhone continuation were not reverified in v0.1.6. Completed reservations and purchases remain untested. Keep evidence attributed to its actual build. These are coverage gaps, not confirmed product restrictions.
 
 Account sign-in problems should be diagnosed separately from Steve's controls. A website's phone-number or verification requirement does not by itself establish a Steve login bug. Keep personal account details in private logs.
 
 ## Acceptance scenarios
+
+### Onboarding: Steve's additional dimension
+
+Treat onboarding as a seventeenth **Steve-specific** dimension alongside the 16 Assistant Benchmark dimensions, not as part of that benchmark's official rubric. Its success is the first useful, observed result—not a saved address or a dismissed setup screen. Keep raw evidence private.
+
+- Fresh installation: choose one owner during setup, optionally name the agent and describe its personality. Defaults work without extra questions.
+- Start with “hey” or “Open example.com.” No code, command syntax or technical coaching on an owner-capable build. The greeting is generated in the chosen style; an actual first task is preserved and executed.
+- Inspect both agent profiles' instructions and actual replies for the chosen identity. Runtime status, security errors and transport acknowledgments remain factual fixed messages; task outcomes must not be scripted by test topic.
+- Reject other senders, SMS, groups, sent-by-me messages, old synced history and a second private chat. An owner change cannot silently replace a connected conversation.
+- Restart before and after first contact; repeat installation; change name/style; preserve pairing, settings, grants, queued tasks and workspace. Disconnect must remove automatic owner authorization as well as the chat binding.
+- Test a missing Messages grant, denied Automation and an unavailable model. Explain the real next step and retain the first task without falsely declaring setup complete.
+- Record time to first useful result, required human steps, unnecessary questions, address mistakes, unsupported assumptions and assisted recovery. Do not count simulated transport as live iMessage acceptance.
+
+See [setup compatibility](setup.md#2-messages-access-and-pairing): v0.1.6 uses the legacy code flow; the owner-capable source update still needs fresh-install live acceptance.
+
+### Runtime scenarios
 
 | Scenario | Action | Required evidence |
 | --- | --- | --- |

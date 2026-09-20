@@ -42,6 +42,7 @@ struct Settings: Codable, Sendable {
     var relayServiceTier: SteveServiceTier = .standard
     var maxConcurrentOperators: Int = 2
     var maxHelpersPerOperator: Int = 1
+    var personality: String = ""
 }
 enum SteveServiceTier: String, Codable, CaseIterable, Sendable {
     case standard, fast
@@ -67,6 +68,7 @@ extension Settings {
         relayServiceTier = try c.decodeIfPresent(SteveServiceTier.self, forKey: .relayServiceTier) ?? .standard
         maxConcurrentOperators = try c.decodeIfPresent(Int.self, forKey: .maxConcurrentOperators) ?? 2
         maxHelpersPerOperator = try c.decodeIfPresent(Int.self, forKey: .maxHelpersPerOperator) ?? 1
+        personality = try c.decodeIfPresent(String.self, forKey: .personality) ?? ""
         guard (1...4).contains(maxConcurrentOperators) else {
             throw DecodingError.dataCorruptedError(forKey: .maxConcurrentOperators, in: c, debugDescription: "Maximum concurrent operators must be from 1 through 4.")
         }
@@ -85,7 +87,7 @@ struct RateWindow: Codable, Sendable { let usedPercent: Double; let windowDurati
 struct Usage: Codable, Sendable { let primary: RateWindow?; let secondary: RateWindow? }
 struct TrustedConversation: Codable, Sendable { let chatGuid: String; let senderHandle: String }
 struct ReceiveAddress: Codable, Identifiable, Sendable { let address: String; let label: String?; var id: String { address } }
-struct PairingChallenge: Codable, Sendable {
+struct PairingChallenge: Codable, Equatable, Sendable {
     let code: String; let expiresAtMs: UInt64; let receiveAddress: String; let uri: String; let messageURI: String
     enum CodingKeys: String, CodingKey { case code, expiresAtMs, receiveAddress, uri; case messageURI = "messageUri" }
     init(code: String, expiresAtMs: UInt64, receiveAddress: String, uri: String, messageURI: String = "") { self.code = code; self.expiresAtMs = expiresAtMs; self.receiveAddress = receiveAddress; self.uri = uri; self.messageURI = messageURI }
@@ -98,7 +100,7 @@ struct PairingChallenge: Codable, Sendable {
         messageURI = try container.decodeIfPresent(String.self, forKey: .messageURI) ?? ""
     }
 }
-struct Snapshot: Codable, Sendable { let status: Status; let settings: Settings; let paused: Bool; let dependencies: [Dependency]; let transportMode: String; let account: AccountSnapshot?; let models: [ModelEntry]; let permissions: [PermissionProfile]; let usage: Usage?; let trustedConversation: TrustedConversation?; let pairing: PairingChallenge?; var tasks: [OperatorTaskSummary] = []; var nativeHelpersAvailable: Bool? = nil }
+struct Snapshot: Codable, Sendable { let status: Status; let settings: Settings; let paused: Bool; let dependencies: [Dependency]; let transportMode: String; let account: AccountSnapshot?; let models: [ModelEntry]; let permissions: [PermissionProfile]; let usage: Usage?; let trustedConversation: TrustedConversation?; let pairing: PairingChallenge?; var tasks: [OperatorTaskSummary] = []; var nativeHelpersAvailable: Bool? = nil; var ownerSetup: SteveOwnerSetup? = nil }
 struct Dependency: Codable, Sendable { let name: String; let available: Bool; let detail: String }
 struct UsageRow: Identifiable, Sendable { let id: String; let title: String; let subtitle: String }
 struct LoginSnapshot: Codable, Sendable { let loginID: String?; let authURL: String?; enum CodingKeys: String, CodingKey { case loginID = "loginId"; case authURL = "authUrl" } }
@@ -112,6 +114,7 @@ final class SteveModel: ObservableObject {
     @Published var loginURL: URL?
     @Published var requiresLogin = false
     @Published var phoneOpen = false
+    @Published var savingOwner = false
     @Published var addresses: [ReceiveAddress] = []
     @Published var icloudAccount = ""
     @Published var pairing: PairingChallenge?
@@ -245,6 +248,30 @@ final class SteveModel: ObservableObject {
     func selectMaxHelpersPerOperator(_ value: Int) { run { try await $0.selectMaxHelpersPerOperator(value) } }
     func togglePause() { let value = snapshot?.paused != true; run { try await $0.setPaused(value) } }
     func startPhonePairing() {
+        message = ""
+        phoneOpen = true
+        monitorPairing()
+    }
+    func saveIdentity(name: String, personality: String) {
+        run { try await $0.configureIdentity(name: name, personality: personality) }
+    }
+    func allowOwner(address: String, name: String, personality: String) {
+        guard let runtime, !savingOwner else { return }
+        savingOwner = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.savingOwner = false }
+            do {
+                _ = try SteveOnboarding.ownerAddress(address)
+                try await runtime.configureIdentity(name: name, personality: personality)
+                _ = try await runtime.configureOwner(address)
+                await self.updateSnapshot(from: runtime)
+                self.message = ""
+                self.monitorPairing()
+            } catch { self.message = error.localizedDescription }
+        }
+    }
+    func startCodePairing() {
         guard let runtime else { return }; message = "Preparing phone pairing…"
         Task { [weak self] in do { let result = try await runtime.createPairing(); await MainActor.run { self?.addresses = result.addresses; self?.icloudAccount = result.icloudAccount ?? ""; self?.pairing = result.challenge; self?.phoneOpen = true; self?.message = "Scan to open Messages, then send the one-time code below."; self?.monitorPairing() } } catch { await MainActor.run { self?.message = error.localizedDescription } } }
     }
@@ -302,6 +329,7 @@ struct StevePopover: View {
     @State private var permissionsExpanded = false; @State private var operatorModelsExpanded = false; @State private var operatorEffortsExpanded = false
     @State private var relayModelsExpanded = false; @State private var relayEffortsExpanded = false; @State private var operatorsExpanded = false; @State private var helpersExpanded = false
     @State private var advancedExpanded = false; @State private var phoneExpanded = false
+    @State private var identityExpanded = false
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) { SteveLogo().frame(width: 30, height: 30); Text("Steve").bold(); Spacer() }.padding(.bottom, 10)
@@ -320,6 +348,9 @@ struct StevePopover: View {
             if model.codexUnavailable { EmptyView() }
             else if model.requiresLogin { if model.loginURL != nil { Button("Open sign-in page", action: model.openLoginPage).buttonStyle(.plain).font(.caption).padding(.horizontal, 8) } }
             else {
+                disclosure("Agent", value: model.snapshot?.settings.displayName ?? "Steve", expanded: $identityExpanded) {
+                    AgentIdentityForm(settings: model.snapshot?.settings, save: model.saveIdentity)
+                }
                 action("Workspace", subtitle: model.snapshot?.settings.workspaceRoot ?? "Not assigned", action: model.chooseWorkspace); Divider()
                 disclosure("Permissions", value: model.snapshot?.settings.permissionProfile.map(humanizeLabel) ?? "Select a profile", expanded: $permissionsExpanded) { ForEach(model.snapshot?.permissions ?? []) { profile in action(humanizeLabel(profile.name ?? profile.id), subtitle: profile.id.trimmingCharacters(in: CharacterSet(charactersIn: ":")) == "danger-full-access" ? permissionDescription(profile.id) : (profile.description ?? permissionDescription(profile.id)), disabled: !profile.allowed) { model.selectPermission(profile.id) } } }
                 Text("Relay").font(.caption).foregroundStyle(.secondary).padding(.top, 7).padding(.horizontal, 7)
@@ -390,8 +421,96 @@ private enum SteveLogoSource {
 }
 struct PhoneView: View {
     @ObservedObject var model: SteveModel
-    var body: some View { VStack(alignment: .leading, spacing: 10) { HStack { SteveLogo().frame(width: 28, height: 28); Text("Connect Phone").bold(); Spacer(); Button("Done", action: model.closePhonePairing) }; if let pairing = model.pairing { Text("Scan to open Messages, then send the one-time code below.").font(.caption).foregroundStyle(.secondary); QRCodeView(value: pairing.messageURI.isEmpty ? pairing.uri : pairing.messageURI).frame(width: 220, height: 220).frame(maxWidth: .infinity); Text(pairing.receiveAddress).font(.caption2).textSelection(.enabled); Text(pairing.code).font(.system(.body, design: .monospaced)).bold(); HStack { Button("Open Messages", action: model.openPairingMessage); Button("Copy Code", action: model.copyPairingCode) } } else { ProgressView("Preparing pairing QR…").frame(maxWidth: .infinity); Button("Try Again", action: model.startPhonePairing).frame(maxWidth: .infinity) } }.padding(16).frame(width: 350) }
+    @State private var address = ""
+    @State private var name = "Steve"
+    @State private var personality = ""
+    @State private var editing = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack { Text("Connect iMessage").font(.headline); Spacer(); Button("Done", action: model.closePhonePairing) }
+            if let pairing = model.pairing {
+                Text("Send this one-time code in a private message.").font(.callout)
+                QRCodeView(value: pairing.messageURI.isEmpty ? pairing.uri : pairing.messageURI).frame(maxWidth: .infinity)
+                Text(pairing.receiveAddress).textSelection(.enabled)
+                Text(pairing.code).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                HStack { Button("Open Messages", action: model.openPairingMessage); Button("Copy Code", action: model.copyPairingCode) }
+            } else if let owner = model.snapshot?.ownerSetup, !editing {
+                Text("Your address").font(.caption).foregroundStyle(.secondary)
+                Text(owner.address).textSelection(.enabled)
+                Text("Send a message to").font(.caption).foregroundStyle(.secondary)
+                Text(owner.receiveAddress).textSelection(.enabled)
+                Text("Say hello or ask for something. Your first private message connects you automatically.").font(.callout)
+                Text("Use the address above as your Send & Receive address in Messages. No code is needed.").font(.caption).foregroundStyle(.secondary)
+                Button("Change address") { editing = true }
+            } else {
+                OwnerSetupForm(address: $address, name: $name, personality: $personality, saving: model.savingOwner) {
+                    model.allowOwner(address: address, name: name, personality: personality)
+                }
+            }
+            if !model.message.isEmpty { Text(model.message).font(.callout).foregroundStyle(.secondary).textSelection(.enabled) }
+            if model.pairing == nil { Button("Connect with a code instead", action: model.startCodePairing).font(.caption).disabled(model.savingOwner) }
+        }
+        .padding(18).frame(width: 370)
+        .onAppear {
+            address = model.snapshot?.ownerSetup?.address ?? ""
+            name = model.snapshot?.settings.displayName ?? "Steve"
+            personality = model.snapshot?.settings.personality ?? ""
+        }
+        .onChange(of: model.savingOwner) { _, saving in
+            if !saving && model.message.isEmpty { editing = false }
+        }
+    }
 }
+
+struct AgentIdentityFields: View {
+    @Binding var name: String
+    @Binding var personality: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Agent name", text: $name).textFieldStyle(.roundedBorder)
+            TextField("Personality, e.g. warm, concise, a little dry", text: $personality, axis: .vertical)
+                .lineLimit(2...4).textFieldStyle(.roundedBorder)
+            Text("Optional. You can change these later. Permissions stay the same.").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
+struct OwnerSetupForm: View {
+    @Binding var address: String
+    @Binding var name: String
+    @Binding var personality: String
+    let saving: Bool
+    let save: () -> Void
+    @State var customize = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Which iMessage address will you text from?").font(.callout)
+            TextField("Your email or +country-code phone number", text: $address).textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Owner's iMessage address")
+            Text("Only this address can connect. Use a different Messages account from the one on this Mac.").font(.caption).foregroundStyle(.secondary)
+            DisclosureGroup("Name and personality (optional)", isExpanded: $customize) {
+                AgentIdentityFields(name: $name, personality: $personality).padding(.top, 6)
+            }
+            Button(saving ? "Saving…" : "Allow this address", action: save)
+                .buttonStyle(.borderedProminent).disabled(saving || address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }.disabled(saving)
+    }
+}
+
+private struct AgentIdentityForm: View {
+    let settings: Settings?
+    let save: (String, String) -> Void
+    @State private var name = "Steve"
+    @State private var personality = ""
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            AgentIdentityFields(name: $name, personality: $personality)
+            Button("Save") { save(name, personality) }
+        }.onAppear { name = settings?.displayName ?? "Steve"; personality = settings?.personality ?? "" }
+    }
+}
+
 struct QRCodeView: View {
     let value: String
     var body: some View { Group { if let image = makeImage() { Image(nsImage: image).resizable().interpolation(.none).scaledToFit() } else { Color.white } }.frame(width: 220, height: 220).background(.white) }
