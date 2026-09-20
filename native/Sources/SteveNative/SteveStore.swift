@@ -402,9 +402,34 @@ actor SteveStore {
         try connection.run("UPDATE queue SET payload_json = ?, updated_at = ? WHERE id = ? AND state = 'pending'", String(decoding: try encoder.encode(deferred), as: UTF8.self), Self.dateFormatter.string(from: Date()), part.id)
     }
 
-    func beginSending(_ id: String) throws -> Bool {
-        try connection.run("UPDATE queue SET state = 'sending', updated_at = ? WHERE id = ? AND state = 'pending'", Self.dateFormatter.string(from: Date()), id)
-        return connection.changes == 1
+    func beginSending(_ id: String, clockNow: @Sendable () -> Date = { Date() }, expectedEpoch: String? = nil) throws -> Bool {
+        var admitted = false
+        try connection.transaction(.immediate) {
+            if let expectedEpoch, try gatewayEpoch() != expectedEpoch { throw CancellationError() }
+            guard let raw = try connection.scalar("SELECT payload_json FROM queue WHERE id = ? AND direction = 'outbound' AND state = 'pending'", id) as? String else { return }
+            let part = try decoder.decode(OutboundPart.self, from: Data(raw.utf8))
+            var followUp: (policy: FollowUpPolicy, timeZone: String)?
+            if let runID = part.followUpRunID {
+                guard let workspace = part.workspace, let permission = part.permission,
+                      let authorization = try? ScheduleAuthorization(chatGUID: part.chatGuid, senderHandle: part.recipient, workspace: workspace, permission: permission),
+                      let context = try SteveUserAutomationStore.followUpDeliveryContext(connection: connection, id: runID, authorization: authorization) else {
+                    try failPendingOutboundPart(part); return
+                }
+                followUp = context
+            }
+            // Sample after the policy reads, without an actor suspension before admission.
+            let now = clockNow()
+            if let followUp, now >= followUp.policy.expiresAt { try failPendingOutboundPart(part); return }
+            guard part.notBefore == nil || part.notBefore! <= now else { return }
+            if let followUp, let morning = followUp.policy.deferredUntil(now: now, timeZone: followUp.timeZone) {
+                if morning >= followUp.policy.expiresAt { try failPendingOutboundPart(part) }
+                else { try deferOutboundPart(part, until: morning) }
+                return
+            }
+            try connection.run("UPDATE queue SET state = 'sending', updated_at = ? WHERE id = ? AND state = 'pending'", Self.dateFormatter.string(from: now), id)
+            admitted = connection.changes == 1
+        }
+        return admitted
     }
 
     func finishSending(_ part: OutboundPart, sent: Bool) throws {
@@ -454,12 +479,16 @@ actor SteveStore {
 
     func failOutboundPart(_ part: OutboundPart) throws {
         try connection.transaction(.immediate) {
-            let pending = try queuePayloads(OutboundPart.self, direction: "outbound", state: "pending")
-            for value in pending where value.id == part.id || !Set(value.inboxGUIDs).isDisjoint(with: part.inboxGUIDs) {
-                try connection.run("UPDATE queue SET state = 'failed' WHERE id = ? AND state = 'pending'", value.id)
-            }
-            try finishInbox(part.inboxGUIDs, state: "failed")
+            try failPendingOutboundPart(part)
         }
+    }
+
+    private func failPendingOutboundPart(_ part: OutboundPart) throws {
+        let pending = try queuePayloads(OutboundPart.self, direction: "outbound", state: "pending")
+        for value in pending where value.id == part.id || !Set(value.inboxGUIDs).isDisjoint(with: part.inboxGUIDs) {
+            try connection.run("UPDATE queue SET state = 'failed' WHERE id = ? AND state = 'pending'", value.id)
+        }
+        try finishInbox(part.inboxGUIDs, state: "failed")
     }
 
     func workCounts(excludingGUID: String = "") throws -> (pending: Int, running: Int, uncertain: Int, failed: Int) {

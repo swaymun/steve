@@ -1589,4 +1589,39 @@ final class GatewayLifecycleTests: XCTestCase {
         XCTAssertTrue(expiredSent.isEmpty)
     }
 
+    func testFollowUpSendAdmissionRechecksPolicyWithFreshClock() async throws {
+        for scenario in ["expired", "cancelled", "quiet", "ready"] {
+            let clock = FixtureClock(ISO8601DateFormatter().date(from: "2026-09-21T01:58:59Z")!)
+            let (store, gateway, _, _) = try await setup([], withAutomation: true, clock: clock)
+            try await store.saveGatewayEpoch("admission")
+            // Leave the gateway stopped: the test controls admission directly.
+            let (automation, run, part) = try await stageFollowUpAcrossQuietHours(store: store, gateway: gateway, clock: clock, taskID: scenario,
+                endsAt: scenario == "expired" ? "2026-09-20T22:30:00-04:00" : "2026-09-23T12:00:00-04:00")
+            let initiallyValid = try await automation.validateFollowUpDelivery(id: run.id, authorization: run.authorization, now: clock.now())
+            XCTAssertTrue(initiallyValid)
+            if scenario == "cancelled" {
+                try await automation.cancelPlan(taskID: scenario, provenance: .init(source: .pairedMessage, sourceID: "cancel", statement: "Cancel this plan", explicitlyRequested: true, recordedAt: clock.now()), now: clock.now(), expectedEpoch: "admission")
+            }
+            let advance: TimeInterval = ["expired", "ready"].contains(scenario) ? 36_060 : 60
+            let admitted = try await store.beginSending(part.id, clockNow: {
+                clock.advance(advance) // Changes after policy reads, exactly at admission.
+                return clock.now()
+            }, expectedEpoch: "admission")
+            XCTAssertEqual(admitted, scenario == "ready", scenario)
+            let state = try await store.queueState(part.id)
+            XCTAssertEqual(state, scenario == "ready" ? "sending" : scenario == "quiet" ? "pending" : "failed", scenario)
+            if scenario == "quiet" {
+                let morning = ISO8601DateFormatter().date(from: "2026-09-21T12:00:00Z")!
+                let pendingNow = try await store.pendingOutbox(now: clock.now()), pendingMorning = try await store.pendingOutbox(now: morning)
+                XCTAssertTrue(pendingNow.isEmpty)
+                XCTAssertEqual(pendingMorning.map(\.id), [part.id])
+                XCTAssertEqual(pendingMorning.first?.notBefore, morning)
+            }
+            if admitted {
+                let duplicate = try await store.beginSending(part.id, clockNow: { clock.now() }, expectedEpoch: "admission")
+                XCTAssertFalse(duplicate)
+            }
+        }
+    }
+
 }

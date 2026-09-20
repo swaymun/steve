@@ -296,11 +296,21 @@ actor SteveUserAutomationStore {
     }
 
     func validateFollowUpDelivery(id: String, authorization: ScheduleAuthorization, now: Date) throws -> Bool {
-        guard let run = try run(id: id), run.authorization == authorization, run.state != .cancelled,
-              let policy = run.followUp, now < policy.expiresAt,
-              let schedule = try schedule(id: run.scheduleID), schedule.revision == run.scheduleRevision,
-              schedule.authorization == authorization, [.active, .exhausted].contains(schedule.state) else { return false }
-        return true
+        guard let context = try Self.followUpDeliveryContext(connection: connection, id: id, authorization: authorization) else { return false }
+        return now < context.policy.expiresAt
+    }
+
+    /// SteveStore uses this inside the transaction that admits the outbound send.
+    static func followUpDeliveryContext(connection: Connection, id: String, authorization: ScheduleAuthorization) throws -> (policy: FollowUpPolicy, timeZone: String)? {
+        let decoder = JSONDecoder()
+        guard let raw = try connection.scalar("SELECT payload_json FROM user_schedule_runs WHERE id = ?", id) as? String else { return nil }
+        let run = try decoder.decode(UserScheduleRun.self, from: Data(raw.utf8))
+        guard run.authorization == authorization, run.state != .cancelled, let policy = run.followUp,
+              let scheduleRaw = try connection.scalar("SELECT payload_json FROM user_schedules WHERE id = ?", run.scheduleID) as? String else { return nil }
+        let schedule = try decoder.decode(UserSchedule.self, from: Data(scheduleRaw.utf8))
+        guard schedule.revision == run.scheduleRevision,
+              schedule.authorization == authorization, [.active, .exhausted].contains(schedule.state) else { return nil }
+        return (policy, schedule.timeZone)
     }
 
     func validateEnqueued(id: String, authorization: ScheduleAuthorization) throws -> Bool {

@@ -1157,18 +1157,6 @@ actor GatewayCoordinator {
         let trusted = try await store.trustedConversation()
         let settings = try await store.getSettings() ?? defaultSettings()
         try check(epoch, control: part.isControl)
-        if let runID = part.followUpRunID {
-            guard let automation, let run = try await automation.run(id: runID), let policy = run.followUp,
-                  clockNow() < policy.expiresAt,
-                  try await automation.validateFollowUpDelivery(id: runID, authorization: run.authorization, now: clockNow()) else {
-                try await store.failOutboundPart(part); return
-            }
-            if let schedule = try await automation.schedule(id: run.scheduleID),
-               let morning = policy.deferredUntil(now: clockNow(), timeZone: schedule.timeZone) {
-                try await store.deferOutboundPart(part, until: morning)
-                return
-            }
-        }
         if part.id.hasPrefix("ack:") {
             let guid = String(part.id.dropFirst(4))
             guard let state = try await store.queueState("inbound:" + guid), ["pending", "running"].contains(state) else {
@@ -1202,7 +1190,7 @@ actor GatewayCoordinator {
             SteveLog.write("Gateway quarantined undeliverable result error=\(error.localizedDescription)")
             return
         }
-        guard try await store.beginSending(part.id) else { return }
+        guard try await store.beginSending(part.id, clockNow: clockNow, expectedEpoch: epoch) else { return }
         do {
             try check(epoch, control: part.isControl)
             if let path = part.attachmentPath {
