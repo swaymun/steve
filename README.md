@@ -9,8 +9,6 @@ Steve runs on your Mac, uses your existing Codex login and browser session, and 
   <img src="guide/images/imessage-shopping.png" alt="Recreated iMessage exchange: Steve compares REI bottles, adds one to the cart, stops before entering personal details or ordering, and delivers the actual checkout screenshot." width="350">
 </p>
 
-Recreated from real Mac Mini task exchanges on September 19, 2026; messages and file labels are shortened. The itinerary file and checkout screenshot were delivered through iMessage. The hotel rate shown is before tax; the checkout total can change with shipping and tax. Nothing was booked or purchased.
-
 ## What you can ask Steve
 
 > Research the best monitor arm under $100.
