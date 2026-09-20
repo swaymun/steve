@@ -1666,9 +1666,7 @@ extension GatewayCoordinator {
                 quiescent = false
                 let repair = "Your completed work is retained. Only repair the deliverable format: convert the Markdown attachments below into readable \(targetExtension.uppercased()) files, reopen and verify them, then return the same result and any blocker with corrected artifacts. Keep each artifact ID, replacing each Markdown file with the requested format and retaining all other artifacts. Do not repeat external actions or do new research. The user did not request Markdown.\nVERIFIED_ARTIFACTS_JSON:\n" + (try encodeJSON(verified)) + "\nCOMPLETED_RESULT_JSON:\n" + (try encodeJSON(envelope))
                 let repaired = try await codex.runTurn(threadID: threadID, text: repair, attachmentPaths: [], workspace: current.workspace,
-                    model: settings.model, effort: settings.effort, serviceTier: settings.serviceTier, onProgress: { event in
-                        await self.operatorProgress(taskID: launched.id, runID: launched.runID, text: event.text, epoch: epoch)
-                    }, onTurnStarted: { turnID in
+                    model: settings.model, effort: settings.effort, serviceTier: settings.serviceTier, onProgress: nil, onTurnStarted: { turnID in
                         await self.operatorTurnStarted(taskID: launched.id, epoch: epoch, threadID: threadID, turnID: turnID)
                     })
                 try check(epoch)

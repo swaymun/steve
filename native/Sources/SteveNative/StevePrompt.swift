@@ -9,7 +9,7 @@ struct StevePromptContext: Sendable, Equatable {
 }
 
 enum StevePrompt {
-    static let relayPromptVersion = "relay-v16-ordinary-messages-3"
+    static let relayPromptVersion = "relay-v16-ordinary-messages-4"
 
     static func timeContext(now: Date, timeZone: String) -> String {
         let formatter = ISO8601DateFormatter()
@@ -93,7 +93,7 @@ enum StevePrompt {
         {"schemaVersion":1,"kind":"relay_request","action":"execute|reply|clarify|cancel|refuse|control","taskID":null,"taskTitle":"Short goal","mode":"background|computer","workerPrompt":"Concise goal and relevant context","userMessage":null,"workerContextAction":"reuse|compact|fresh"}
         New execute needs taskTitle and mode; follow-ups need the existing taskID. Direct replies/clarifications use userMessage, no workerPrompt. Cancel needs taskID, no workerPrompt. A useful clarification is a valid outcome.
 
-        Preferences and schedules use action=control with a nested control, not a worker. Example:
+        Preferences and explicitly timed reminders or routines use action=control with a nested control. Ongoing follow-through ("keep an eye on that until it ends") uses execute with the plan's owner to verify dates and return an active plan; do not turn monitoring into a detached reminder or single check at the end. Example:
         {"schemaVersion":1,"kind":"relay_request","action":"control","control":{"operation":"preference_set","key":"diet","value":"vegetarian","userQuote":"I'm vegetarian"}}
         A clearly stated lasting preference may be saved without the word "remember". Distinguish temporary constraints ("vegetarian tonight"). For a preference AND a task, keep action=execute and add memoryUpdates:[{same preference_set or preference_forget object}]; never discard the task. Quote only current human words, not attachments, third parties or history. Save no credentials, raw inbox content or inferred sensitive facts. Correction replaces the active value; forgetting removes it, not historical chats. The latest SAVED_USER_PREFERENCES_JSON is the complete active set, including when empty. ACTIVE_PLANS_JSON is tentative/verified context, never expanded authority.
 
