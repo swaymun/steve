@@ -9,6 +9,8 @@ Steve runs on your Mac, uses your existing Codex login and browser session, and 
   <img src="guide/images/imessage-shopping.png" alt="Recreated iMessage exchange: Steve compares REI bottles, adds one to the cart, stops before entering personal details or ordering, and delivers the actual checkout screenshot." width="350">
 </p>
 
+Example conversations from tested Steve workflows.
+
 ## What you can ask Steve
 
 > Research the best monitor arm under $100.
@@ -30,7 +32,7 @@ iPhone → iMessage → Steve on your Mac → Codex → apps and websites
 
 **Development preview:** [Current support and limits](guide/preview-limitations.md). MIT licensed.
 
-**Requires:** an Apple silicon Mac with macOS 14+, Codex, and a **separate Messages account on the Mac running Steve**. Computer Use has its own availability and macOS requirements; see [setup](guide/setup.md). Same-account self-messaging is outside this setup flow.
+**Requires:** an Apple silicon Mac with macOS 14+, **Codex installed and signed in**, and a **separate Messages account on the Mac running Steve**. Computer Use has its own availability and macOS requirements; see [setup](guide/setup.md). Same-account self-messaging is outside this setup flow.
 
 ## Install with an agent
 
@@ -54,7 +56,7 @@ The commands use the running app's local CLI. A web chat without local Mac tools
 
 ## Install manually
 
-[Download v0.1.4 for Apple silicon](https://github.com/swaymun/steve/releases/download/v0.1.4/Steve-macOS.zip) · [SHA-256 checksum](https://github.com/swaymun/steve/releases/download/v0.1.4/Steve-macOS.zip.sha256) · [Release notes](https://github.com/swaymun/steve/releases/tag/v0.1.4)
+[Download v0.1.5 for Apple silicon](https://github.com/swaymun/steve/releases/download/v0.1.5/Steve-macOS.zip) · [SHA-256 checksum](https://github.com/swaymun/steve/releases/download/v0.1.5/Steve-macOS.zip.sha256) · [Release notes](https://github.com/swaymun/steve/releases/tag/v0.1.5)
 
 Use macOS 14 or later with Codex installed and signed in. The prebuilt app is Developer ID signed and notarized by Apple; no source build is needed. Native Computer Use has its own availability and macOS requirements. The Mac must remain awake, signed in, and running Steve.
 
@@ -83,9 +85,9 @@ Messages content and relevant task context are sent to Codex to process requests
 
 ## How Steve works
 
-Steve is a native SwiftUI menu-bar app. One persistent relay keeps the conversation; each independent task has an operator that owns its context and result through the installed Codex App Server. The relay defaults to Luna Low Standard. Operator models and service tiers are [configured separately](guide/setup.md#relay-and-operator-settings).
+Steve is a native SwiftUI menu-bar app that uses your installed Codex to carry out requests and keep task context. Models and task settings are [configurable](guide/setup.md#relay-and-operator-settings).
 
-By default, two operators can work at once. Public research can use one restricted native helper per operator. Only one operator controls the visible Mac and browser at a time. Say “Also…” to start another goal, correct a task in ordinary language, or ask Steve to cancel a named task. Context can be reused or compacted. Codex owns authentication; Steve stores no ChatGPT tokens and needs no OpenAI API key.
+Steve can work on two independent tasks at once by default, but only one task controls the visible Mac at a time. Say “Also…” to start another goal, correct a task in ordinary language, or ask Steve to cancel a named task.
 
 Native Computer Use operates the visible browser and apps. Steve reads the local Messages database and sends replies through public AppleScript. Queues, saved preferences, reminders, and task state persist across restarts. Ambiguous executions or sends need review and are never automatically replayed.
 
@@ -93,7 +95,7 @@ One exact private conversation is paired with a short-lived code. Other chats, g
 
 Optional [phone control](guide/setup.md#phone-control-in-safari) shows the Mac's current browser session in Safari through private Tailscale Serve. Tailscale is required on both devices for this feature; basic messaging and Computer Use do not need it.
 
-Add services through [Codex MCP integrations](guide/setup.md#mcp-integrations) on the Mac running Steve. Its execution operators can use compatible, authenticated servers without a Steve-specific adapter.
+Add services through [Codex MCP integrations](guide/setup.md#mcp-integrations) on the Mac running Steve. Steve can use compatible, authenticated servers without a service-specific adapter.
 
 ## Development
 
