@@ -49,6 +49,52 @@ final class WorkspaceMemoryFollowUpTests: XCTestCase {
         }
     }
 
+    func testInvalidProposedChecksUseDailyFallbackBeforePlanExpiry() async throws {
+        let now = date("2026-09-20T12:15:00-04:00")
+        let end = "2026-09-22T12:45:00-04:00"
+        let fallback = date("2026-09-21T09:00:00-04:00")
+        for proposed in [end, "2026-09-22T13:00:00-04:00", "2026-09-20T12:15:00-04:00", "2026-09-20T12:00:00-04:00"] {
+            let root = try directory(), store = try await store(root), boundary = try authorization(root)
+            var update = activePlan(end: end, next: proposed)
+            update.startsAt = "2026-09-22T12:15:00-04:00"
+            try await store.savePlan(taskID: "plan", update: update, authorization: boundary, provenance: provenance(), timeZone: "America/New_York", now: now, expectedEpoch: "epoch")
+            let schedules = try await store.schedules()
+            XCTAssertEqual(schedules.count, 1, proposed)
+            XCTAssertEqual(schedules.first?.nextRunAt, fallback, proposed)
+            let runs = try await store.claimDue(now: fallback, authorization: boundary, dispatchEpoch: "epoch")
+            XCTAssertEqual(runs.count, 1, proposed)
+            XCTAssertEqual(runs.first?.scheduledAt, fallback, proposed)
+        }
+    }
+
+    func testValidProposedCheckIsPreservedBeforePlanExpiry() async throws {
+        let root = try directory(), store = try await store(root), boundary = try authorization(root)
+        let next = "2026-09-22T12:30:00-04:00", end = "2026-09-22T12:45:00-04:00"
+        try await store.savePlan(taskID: "plan", update: activePlan(end: end, next: next), authorization: boundary, provenance: provenance(), timeZone: "America/New_York", now: date("2026-09-20T12:15:00-04:00"), expectedEpoch: "epoch")
+        let schedules = try await store.schedules()
+        XCTAssertEqual(schedules.first?.nextRunAt, date(next))
+        let runs = try await store.claimDue(now: date(next), authorization: boundary, dispatchEpoch: "epoch")
+        XCTAssertEqual(runs.count, 1)
+        XCTAssertEqual(runs.first?.scheduledAt, date(next))
+        let exhausted = try await store.schedule(id: XCTUnwrap(schedules.first).id)
+        XCTAssertNil(exhausted?.nextRunAt)
+        XCTAssertEqual(exhausted?.state, .exhausted)
+        let expiredRuns = try await store.claimDue(now: date(end), authorization: boundary, dispatchEpoch: "epoch")
+        XCTAssertTrue(expiredRuns.isEmpty)
+    }
+
+    func testDailyFallbackCannotReachOrExceedPlanExpiry() async throws {
+        for end in ["2026-09-20T12:45:00-04:00", "2026-09-21T09:00:00-04:00"] {
+            let root = try directory(), store = try await store(root), boundary = try authorization(root)
+            try await store.savePlan(taskID: "plan", update: activePlan(end: end, next: end), authorization: boundary, provenance: provenance(), timeZone: "America/New_York", now: date("2026-09-20T12:15:00-04:00"), expectedEpoch: "epoch")
+            let schedules = try await store.schedules(), plans = try await store.plans(authorization: boundary)
+            XCTAssertTrue(schedules.isEmpty, end)
+            XCTAssertNil(plans.first?.scheduleID, end)
+            let runs = try await store.claimDue(now: date(end), authorization: boundary, dispatchEpoch: "epoch")
+            XCTAssertTrue(runs.isEmpty, end)
+        }
+    }
+
     func testQuietHoursDSTAndVerifiedDeadlinePolicy() {
         let expiration = date("2026-11-10T12:00:00Z")
         let policy = FollowUpPolicy(taskID: "plan", expiresAt: expiration, verifiedDeadline: nil)
@@ -70,6 +116,12 @@ final class WorkspaceMemoryFollowUpTests: XCTestCase {
         let start = date("2026-09-20T13:00:00Z")
         try await store.savePlan(taskID: "cancel", update: activePlan(), authorization: boundary, provenance: provenance("start", statement: "Track this plan"), timeZone: "America/New_York", now: start, expectedEpoch: "epoch")
         try await store.cancelPlan(taskID: "cancel", provenance: provenance("cancel", statement: "Cancel this plan."), now: start, expectedEpoch: "epoch")
+        try await store.savePlan(taskID: "cancel", update: activePlan(next: "2026-10-01T09:00:00-04:00"), authorization: boundary, provenance: provenance("start", statement: "Track this plan"), timeZone: "America/New_York", now: start.addingTimeInterval(1), expectedEpoch: "epoch")
+        let cancelledPlans = try await store.plans(authorization: boundary), cancelledSchedules = try await store.schedules()
+        XCTAssertEqual(cancelledPlans.first?.update.state, .cancelled)
+        XCTAssertEqual(cancelledPlans.first?.provenance.sourceID, "cancel")
+        XCTAssertEqual(cancelledSchedules.count, 1)
+        XCTAssertEqual(cancelledSchedules.first?.state, .cancelled)
         let cancelledRuns = try await store.claimDue(now: start.addingTimeInterval(86_400), authorization: boundary, dispatchEpoch: "epoch")
         XCTAssertTrue(cancelledRuns.isEmpty)
 

@@ -1346,6 +1346,27 @@ final class GatewayLifecycleTests: XCTestCase {
         await gateway.stop()
     }
 
+    func testPlanDeliveryUsesSavedScheduleRatherThanWorkerPromise() async throws {
+        for (end, expected) in [("2026-09-22T12:45:00-04:00", "Next check: 2026-09-21T09:00:00-04:00"),
+                                ("2026-09-20T16:00:00-04:00", "No future checks were scheduled")] {
+            let clock = FixtureClock(ISO8601DateFormatter().date(from: "2026-09-20T15:00:00-04:00")!)
+            let result = """
+            {"schemaVersion":1,"kind":"worker_result","status":"completed","summary":"I'll report when it ends.","plan":{"summary":"Monitor lunch changes","state":"active","userQuote":"Watch lunch","endsAt":"\(end)","nextCheckAt":"\(end)"}}
+            """
+            let delivery = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Confirmed the actual follow-through status."]}"#
+            let (store, gateway, _, codex) = try await setup([relay, result, delivery], withAutomation: true, clock: clock)
+            var settings = try await store.getSettings()!
+            settings.timezone = "America/New_York"
+            try await store.saveSettings(settings)
+            await gateway.start(); await gateway.receive(inbound("watch-lunch", text: "Watch lunch"))
+            try await eventually { try await store.queueState("inbound:watch-lunch") == "completed" }
+            let inputs = await codex.inputs
+            XCTAssertTrue(inputs.last?.contains("FOLLOW_UP_STATUS (authoritative runtime state") == true)
+            XCTAssertTrue(inputs.last?.contains(expected) == true)
+            await gateway.stop()
+        }
+    }
+
     func testVerifiedLoginOffersBoundLinkAndPageCompletionContinuesSameTask() async throws {
         let blocked = #"{"schemaVersion":1,"kind":"worker_result","status":"blocked","summary":"Sign in to continue.","blocker":{"reason":"sign_in","userAction":"Sign in on the open page.","verification":"Check the account and cart after sign-in.","pageVerified":true}}"#
         let delivery = #"{"schemaVersion":1,"kind":"delivery_plan","status":"failed","messages":["Sign in to continue."]}"#

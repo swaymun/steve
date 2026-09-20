@@ -65,7 +65,7 @@ actor SteveUserAutomationStore {
             var value = StevePlanRecord(taskID: taskID, update: update, authorization: authorization, provenance: provenance, updatedAt: now, scheduleID: nil, lastNotification: old?.lastNotification)
             if update.state == .active, let end = WorkerPlanUpdate.date(update.endsAt), end > now {
                 let rule: UserScheduleRule = .calendar(hour: 9, minute: 0, weekdays: [])
-                let next = try WorkerPlanUpdate.date(update.nextCheckAt).flatMap { $0 > now ? $0 : nil } ?? rule.firstOccurrence(now: now, timeZone: timeZone)
+                let next = try WorkerPlanUpdate.date(update.nextCheckAt).flatMap { $0 > now && $0 < end ? $0 : nil } ?? rule.firstOccurrence(now: now, timeZone: timeZone)
                 if next < end {
                     let policy = FollowUpPolicy(taskID: taskID, expiresAt: end, verifiedDeadline: update.deadlineVerified == true ? WorkerPlanUpdate.date(update.deadline) : nil)
                     let prompt = "Check this adopted plan using authorized read-only sources. Notify only of a verified meaningful change, deadline, blocker or needed decision; otherwise return notifyUser=false. Do not send, book, buy or change accounts. Plan: " + update.summary

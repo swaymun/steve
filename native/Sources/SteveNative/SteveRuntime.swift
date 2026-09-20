@@ -1823,12 +1823,21 @@ extension GatewayCoordinator {
             guard trusted?.chatGuid == task.chatGuid, normalizeHandle(trusted?.senderHandle ?? "") == normalizeHandle(task.senderHandle),
                   settings.workspaceRoot == task.workspace, settings.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")) == task.permission else { throw CancellationError() }
             let authorization = try ScheduleAuthorization(chatGUID: task.chatGuid, senderHandle: task.senderHandle, workspace: task.workspace, permission: task.permission)
+            var followUpStatus = envelope.plan != nil && task.scheduledRunID == nil
+                ? "No future checks were scheduled. Do not promise monitoring or an end notification." : nil
             if let update = envelope.plan, task.scheduledRunID == nil, let automation,
                let source = (task.originalMessages ?? task.inbound).last(where: { !$0.guid.hasPrefix("schedule:") && $0.text.contains(update.userQuote) }) {
                 let provenance = ExplicitUserProvenance(source: .pairedMessage, sourceID: source.guid, statement: update.userQuote, explicitlyRequested: true, recordedAt: clockNow())
                 let timeZone = StevePrompt.userTimeZone(preferences: try await automation.preferences(), configured: settings.timezone)
                 try await automation.savePlan(taskID: task.id, update: update, authorization: authorization, provenance: provenance, timeZone: timeZone, now: clockNow(), expectedEpoch: epoch)
                 try await projectMemory(authorization: authorization)
+                if let saved = try await automation.plans(authorization: authorization).first(where: { $0.taskID == task.id }),
+                   let id = saved.scheduleID, let schedule = try await automation.schedule(id: id),
+                   schedule.state == .active, let next = schedule.nextRunAt, let policy = schedule.followUp {
+                    let formatter = ISO8601DateFormatter()
+                    formatter.timeZone = TimeZone(identifier: timeZone)
+                    followUpStatus = "Read-only follow-through is scheduled. Next check: \(formatter.string(from: next)); subsequent fallback checks at most daily at 9 AM. Stops before \(formatter.string(from: policy.expiresAt)). Notify only of meaningful changes; no end notification is scheduled."
+                }
             }
             var deferNotificationUntil: Date?
             var followUpRunID: String?
@@ -1851,6 +1860,7 @@ extension GatewayCoordinator {
             let profile = try await codex.relayProfile(settings: settings)
             let artifactSummary = envelope.artifacts.map { ["id": $0.id, "caption": $0.caption ?? "", "mimeType": $0.mimeType ?? ""] }
             let input = "WORKER_RESULT_JSON:\n\(try encodeJSON(envelope))\n\nTASK_TITLE: \(task.title)\nTASK_ID: \(task.id)\n\nVERIFIED_ARTIFACTS_JSON:\n\(try encodeJSON(artifactSummary))\n\nRECOVERY_ATTEMPTED: true. Deliver this task's verified result; never repeat its execution."
+                + (followUpStatus.map { "\n\nFOLLOW_UP_STATUS (authoritative runtime state, overrides scheduling claims in the summary):\n" + $0 } ?? "")
             let result = try await codex.runTurn(threadID: relay, text: input, attachmentPaths: [], workspace: task.workspace, model: profile.model, effort: profile.effort, serviceTier: profile.serviceTier, onTurnStarted: { _ in })
             let plan = try AgentEnvelopeParser.deliveryPlan(from: result.text)
             guard plan.recovery == nil else { throw AgentEnvelopeError.invalidPayload("Completed work cannot be replayed") }
