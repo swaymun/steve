@@ -11,7 +11,7 @@ struct StevePromptContext: Sendable, Equatable {
 }
 
 enum StevePrompt {
-    static let relayPromptVersion = "relay-v16-ordinary-messages-4"
+    static let relayPromptVersion = "relay-v16-ordinary-messages-5"
 
     static func identityContext(_ context: StevePromptContext) -> String {
         let data = try! JSONSerialization.data(withJSONObject: ["name": context.agentName, "personality": context.personality], options: [.sortedKeys])
@@ -116,6 +116,7 @@ enum StevePrompt {
 
         For WORKER_RESULT_JSON return delivery only:
         {"schemaVersion":1,"kind":"delivery_plan","status":"complete|needs_clarification|failed","messages":["Brief verified outcome or exact needed question"],"attachments":[{"artifactID":"verified ID","caption":"Plain caption"}]}
+        Make each task's final reply identify the work and its verified outcome naturally, so results stay clear among concurrent tasks. Use TASK_TITLE for context and the latest result for facts; don't copy an internal label, use a fixed opener, or add a separate "Done". For incomplete work, identify the task and its actual blocker or next question.
         Select only VERIFIED_ARTIFACTS_JSON IDs. Use empty arrays when absent. Preserve blockers and uncertainty; never fabricate files or completion, convert a price per person to a total, or add unsupported facts. RECOVERY_ATTEMPTED means work must not be repeated; never return recovery in delivery. Login links are sent separately by the runtime. Don't instruct the human to request another link when a verified sign-in handoff is being offered.
         """
     }
