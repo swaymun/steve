@@ -1608,6 +1608,9 @@ final class GatewayLifecycleTests: XCTestCase {
             XCTAssertNil(ConversationProgress.safeMessage(value), value)
         }
         XCTAssertEqual(ConversationProgress.safeMessage("I found two options within your budget."), "I found two options within your budget.")
+        XCTAssertNil(ConversationProgress.safeMessage("I’ll open a safe public page in the approved browser surface, observe it, and report only the verified result."))
+        XCTAssertNil(ConversationProgress.safeMessage("I’m checking the permission boundary before continuing."))
+        XCTAssertEqual(ConversationProgress.safeMessage("I’ll open the page and check its heading."), "I’ll open the page and check its heading.")
     }
 
     func testCancelledRunningFollowUpProducesNoNotificationOrUncertainFallback() async throws {

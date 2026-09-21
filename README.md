@@ -67,6 +67,12 @@ Use macOS 14 or later with Codex installed and signed in. The prebuilt app is De
 
 [Verify the download, move Steve.app into Applications, and launch it](guide/setup.md#install-a-release). Then follow the same pairing and Computer Use sequence above. Release discovery includes compatible prereleases as well as stable releases. Intel users can [build from source](guide/setup.md#build-from-source), but Intel builds have not been validated.
 
+## Sign in from your phone
+
+When a task needs a website login, Steve can send a private link that lets Safari control the **same browser session on your Mac**. Take control, finish signing in, then tap **Done—continue** to return the task to Steve. Your password is not sent through iMessage or added to the agent's conversation.
+
+This optional feature uses [private Tailscale Serve](guide/setup.md#optional-tailscale-setup), with Tailscale connected on both devices and separate Steve capture/input permissions. Without it, website sign-in may require returning to the Mac.
+
 ## Permissions and privacy
 
 macOS asks you to grant these permissions yourself. Steve's access profile and the operating system's permissions are separate controls.

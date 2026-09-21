@@ -31,7 +31,7 @@ The [v1.0.0 release](https://github.com/swaymun/steve/releases/tag/v1.0.0) conta
 
 ### Discover the right download
 
-Steve is currently distributed as a GitHub prerelease. Use the [published releases list](https://api.github.com/repos/swaymun/steve/releases), including prereleases, rather than `/releases/latest` or `releases/latest/download` (those can return 404 while a preview exists).
+Use the [published releases list](https://api.github.com/repos/swaymun/steve/releases), including prereleases, to find the newest compatible release. `/releases/latest` and `releases/latest/download` exclude previews and may miss a newer compatible app.
 
 An agent should inspect published, non-draft releases in descending version order and choose the newest compatible one. Check the Mac's architecture and macOS version against the release notes, and require both `Steve-macOS.zip` and `Steve-macOS.zip.sha256` in that same release. GitHub's automatic source ZIP/tar archives are not the app. If no compatible app exists, explain the source-build option rather than claiming there is no release.
 

@@ -1,6 +1,6 @@
 # Validate an installed Steve
 
-Run unit tests first. These checks then exercise the installed app, actual Mac session, and an explicitly authorized private iMessage conversation. Do not run them against another person's account or send messages until the worker has authorized the exact destination. They are manual acceptance scenarios, not an automatic sender.
+Run unit tests first. These checks then exercise the installed app, actual Mac session, and an explicitly authorized private iMessage conversation. Do not run them against another person's account or send messages until the user has authorized the exact destination. They are manual acceptance scenarios, not an automatic sender.
 
 For each scenario, record the installed build identity, start/end time, observed result, artifact verification, and any blocker in a **private** log. A source test, successful process exit, or queued message is not proof of delivery. Do not publish raw conversations, login screens, account identifiers, or unreviewed recordings.
 
@@ -28,7 +28,7 @@ See [setup compatibility](setup.md#2-messages-access-and-pairing): v0.1.6 uses t
 
 The v0.1.7 runtime checks also verified that internal conversations stay in Steve's private runtime, without adding tasks to the desktop Codex history. An earlier v0.1.7 candidate exercised existing conversation import, browser work, restart, and a calendar read before the final fresh-state checks. Keep migration evidence separate from a fresh installation.
 
-v0.1.8 added agent-authored delayed task openings and natural task identification in final replies. Its fixtures, full test suite, optimized build, and release artifact were validated without reinstalling Steve; both cleaned Macs deliberately remained uninstalled, so these message-flow changes do not have new live messaging or device acceptance.
+v0.1.8 added agent-authored delayed task openings and natural task identification in final replies. A later fresh installation of its public build on the Mac Mini verified native browser results, conversation continuity, concurrent requests, a task-specific correction, and restart persistence without duplicate delivery. That run required help diagnosing a sender-address mismatch and completing the guided browser check; it also exposed presentation issues in replies. Full Disk Access was granted afresh; Computer Use and Messages Automation reused existing access. Physical iPhone continuation was not exercised in that run.
 
 ### Runtime scenarios
 

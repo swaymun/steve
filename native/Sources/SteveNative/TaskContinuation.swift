@@ -70,7 +70,7 @@ enum ConversationProgress {
               value.range(of: #"(?i)(?:[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|[0-9a-f]{8}-[0-9a-f-]{27,}|(?:^|\s)/(?:tmp|private|var|home|Applications)/)"#, options: .regularExpression) == nil,
               !value.localizedCaseInsensitiveContains("still working"),
               value.range(of: #"(?i)^(?:i['’]m on it|on it|working on it|got it)[.!…]*$"#, options: .regularExpression) == nil,
-              value.range(of: #"(?i)\b(?:mcp|worker_result|relay|operator|coordinator|worker|thread.?id|codex|gpt-|tool call|schema|skill|subagent|local server)\b"#, options: .regularExpression) == nil,
+              value.range(of: #"(?i)\b(?:mcp|worker_result|relay|operator|coordinator|worker|thread.?id|codex|gpt-|tool call|schema|skill|subagent|local server|browser surface|permission boundary)\b"#, options: .regularExpression) == nil,
               (try? PreferenceSafety.rejectCredentials(in: value)) != nil else { return nil }
         let parts = StevePrompt.plainText(value)
         guard parts.count == 1 else { return nil }

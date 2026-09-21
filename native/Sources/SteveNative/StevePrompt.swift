@@ -11,7 +11,7 @@ struct StevePromptContext: Sendable, Equatable {
 }
 
 enum StevePrompt {
-    static let relayPromptVersion = "relay-v16-ordinary-messages-7"
+    static let relayPromptVersion = "relay-v16-ordinary-messages-8"
 
     static func identityContext(_ context: StevePromptContext) -> String {
         let data = try! JSONSerialization.data(withJSONObject: ["name": context.agentName, "personality": context.personality], options: [.sortedKeys])
@@ -118,7 +118,7 @@ enum StevePrompt {
 
         For WORKER_RESULT_JSON return delivery only:
         {"schemaVersion":1,"kind":"delivery_plan","status":"complete|needs_clarification|failed","messages":["Brief verified outcome or exact needed question"],"attachments":[{"artifactID":"verified ID","caption":"Plain caption"}]}
-        Make each task's final reply identify the work and its verified outcome naturally, so results stay clear among concurrent tasks. Use TASK_TITLE for context and the latest result for facts; don't copy an internal label, use a fixed opener, or add a separate "Done". For incomplete work, identify the task and its actual blocker or next question.
+        Make each task's final reply identify the work and its verified outcome naturally, so results stay clear among concurrent tasks. Use TASK_TITLE for context and the latest result for facts; don't copy an internal label, use a fixed opener, or add a separate "Done". Keep verification procedures and routine permission assurances private unless they explain a blocker, uncertainty or requested evidence. For incomplete work, identify the task and its actual blocker or next question.
         Select only VERIFIED_ARTIFACTS_JSON IDs. Use empty arrays when absent. Preserve blockers and uncertainty; never fabricate files or completion, convert a price per person to a total, or add unsupported facts. RECOVERY_ATTEMPTED means work must not be repeated; never return recovery in delivery. Login links are sent separately by the runtime. Don't instruct the human to request another link when a verified sign-in handoff is being offered.
         """
     }
@@ -142,7 +142,7 @@ enum StevePrompt {
 
         Monitoring checks for meaningful changes while a plan is active, not merely that it ended. A proposed nextCheckAt must precede endsAt; omit it if no useful earlier time is known. Do not promise an end notification or continuous monitoring.
 
-        For work that takes time, begin with one brief commentary sentence naming the specific next step in your own words and chosen style. Skip it for an immediate answer; don't repeat the opening on a correction or continuation. Later commentary reports meaningful outcomes, not generic acknowledgments or "still working" messages. Keep commentary under 160 characters, plain text, without implementation details, tool output, private details or URLs. The runtime delays the opening for quick tasks and rate-limits later updates. Your FINAL response alone must be JSON:
+        For work that takes time, begin with one brief commentary sentence naming the specific next step in your own words and chosen style. Describe the user's task, not tool choices, permission boundaries or verification procedures. Skip it for an immediate answer; don't repeat the opening on a correction or continuation. Later commentary reports meaningful outcomes, not generic acknowledgments or "still working" messages. Keep commentary under 160 characters, plain text, without implementation details, tool output, private details or URLs. The runtime delays the opening for quick tasks and rate-limits later updates. Your FINAL response alone must be JSON:
         {"schemaVersion":1,"kind":"worker_result","status":"completed|needs_clarification|needs_computer|blocked|failed","summary":"Verified result and concise facts needed for continuation","userQuestion":null,"artifacts":[{"id":"artifact-1","path":"/absolute/path","caption":"Plain caption","mimeType":"application/pdf"}],"blocker":{"reason":"sign_in|connection|permission|information|unavailable|uncertain","userAction":"One human step","verification":"Next observation needed","pageVerified":true},"plan":{"summary":"Concise plan facts","state":"proposed|active|completed|cancelled","userQuote":"Exact original words","startsAt":"ISO8601","endsAt":"ISO8601","nextCheckAt":"ISO8601","deadline":"ISO8601","deadlineVerified":false},"notifyUser":true}
         Omit blocker/plan unless relevant and optional dates unless known; artifacts can be []. needs_clarification requires userQuestion. Blocker is only for blocked/needs_clarification. No claims beyond observed evidence.
         """
