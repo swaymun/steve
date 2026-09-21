@@ -1282,7 +1282,7 @@ actor CodexAppServerClient {
         try await ensureInitialized()
         let response = try await requestObject("config/read", params: ["cwd": cwd, "includeLayers": false])
         guard let config = response["config"] as? [String: Any] else {
-            throw RPCError(message: "Cannot verify relay tool configuration")
+            throw RPCError(message: "Cannot verify coordinator tool configuration")
         }
         return Self.relayToolOverrides(effectiveConfig: config)
     }
@@ -1482,7 +1482,7 @@ actor CodexAppServerClient {
         let currentLifecycle = lifecycle
         let task = Task {
             _ = try await self.request("initialize", params: [
-                "clientInfo": ["name": "steve", "version": "0.1.8"],
+                "clientInfo": ["name": "steve", "version": "1.0.0"],
                 "capabilities": ["experimentalApi": true]
             ])
             try Task.checkCancellation()
@@ -1755,14 +1755,14 @@ extension CodexAppServerClient {
            model.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == settings.relayEffort }) {
             return .init(model: model.id, effort: settings.relayEffort, serviceTier: settings.relayServiceTier)
         }
-        guard settings.relayModel == nil else { throw RPCError(message: "The selected relay model or reasoning effort is unavailable in Codex.") }
+        guard settings.relayModel == nil else { throw RPCError(message: "The selected coordinator model or reasoning effort is unavailable in Codex.") }
         return .init(model: settings.model, effort: settings.effort, serviceTier: settings.relayServiceTier)
     }
 
     func operatorThread(threadID: String?, cwd: String, permissionProfile: String, profile: AgentModelProfile, instructions: String, mode: OperatorMode, maxHelpers: Int) async throws -> String {
         try await ensureInitialized()
         let response = try await requestObject("config/read", params: ["cwd": cwd, "includeLayers": false])
-        guard let effective = response["config"] as? [String: Any] else { throw RPCError(message: "Cannot verify operator tool configuration") }
+        guard let effective = response["config"] as? [String: Any] else { throw RPCError(message: "Cannot verify worker tool configuration") }
         var overrides: [String: Any] = ["agents.enabled": false]
         if mode == .background {
             overrides = Self.relayToolOverrides(effectiveConfig: effective)
@@ -1794,7 +1794,7 @@ extension CodexAppServerClient {
         if threadID == nil { params.removeValue(forKey: "threadId") }
         let result = try await threadRequest(method: threadID == nil ? "thread/start" : "thread/resume", params: params)
         try Self.verifyServiceTier(result, requested: profile.serviceTier)
-        guard let id = (result["thread"] as? [String: Any])?["id"] as? String else { throw RPCError(message: "Codex did not return an operator thread") }
+        guard let id = (result["thread"] as? [String: Any])?["id"] as? String else { throw RPCError(message: "Codex did not return a worker thread") }
         if overrides["agents.enabled"] as? Bool == true { helperParents.insert(id) }
         return id
     }
@@ -1807,7 +1807,7 @@ extension CodexAppServerClient {
             helperLineageSupported = true
         } catch {
             helperLineageSupported = false
-            SteveLog.write("Native research helpers unavailable; operators will work independently")
+            SteveLog.write("Native research helpers unavailable; workers will work independently")
         }
         return helperLineageSupported == true
     }
@@ -1817,7 +1817,7 @@ extension CodexAppServerClient {
         var text = """
         name = "steve_research"
         description = "Bounded read-only research helper"
-        developer_instructions = "Complete only your assigned research or analysis, return sources and uncertainty to your operator, and stop. Never operate apps, send messages, change files or accounts, or delegate further."
+        developer_instructions = "Complete only your assigned research or analysis, return sources and uncertainty to your worker, and stop. Never operate apps, send messages, change files or accounts, or delegate further."
         sandbox_mode = "read-only"
         service_tier = \(quoted(profile.serviceTier.wireValue))
         web_search = "live"

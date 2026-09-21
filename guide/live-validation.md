@@ -1,6 +1,6 @@
 # Validate an installed Steve
 
-Run unit tests first. These checks then exercise the installed app, actual Mac session, and an explicitly authorized private iMessage conversation. Do not run them against another person's account or send messages until the operator has authorized the exact destination. They are manual acceptance scenarios, not an automatic sender.
+Run unit tests first. These checks then exercise the installed app, actual Mac session, and an explicitly authorized private iMessage conversation. Do not run them against another person's account or send messages until the worker has authorized the exact destination. They are manual acceptance scenarios, not an automatic sender.
 
 For each scenario, record the installed build identity, start/end time, observed result, artifact verification, and any blocker in a **private** log. A source test, successful process exit, or queued message is not proof of delivery. Do not publish raw conversations, login screens, account identifiers, or unreviewed recordings.
 
@@ -28,7 +28,7 @@ See [setup compatibility](setup.md#2-messages-access-and-pairing): v0.1.6 uses t
 
 The v0.1.7 runtime checks also verified that internal conversations stay in Steve's private runtime, without adding tasks to the desktop Codex history. An earlier v0.1.7 candidate exercised existing conversation import, browser work, restart, and a calendar read before the final fresh-state checks. Keep migration evidence separate from a fresh installation.
 
-v0.1.8 adds agent-authored delayed task openings and natural task identification in final replies. Its fixtures, full test suite, optimized build, and release artifact were validated without reinstalling Steve; both cleaned Macs deliberately remained uninstalled, so these message-flow changes do not have new live messaging or device acceptance.
+v0.1.8 added agent-authored delayed task openings and natural task identification in final replies. Its fixtures, full test suite, optimized build, and release artifact were validated without reinstalling Steve; both cleaned Macs deliberately remained uninstalled, so these message-flow changes do not have new live messaging or device acceptance.
 
 ### Runtime scenarios
 
@@ -41,13 +41,13 @@ v0.1.8 adds agent-authored delayed task openings and natural task identification
 | Browser approval | Request a public HTTPS page through the installed official tool with site approval set to ask. | Scoped approval reaches the phone; explicit decision resolves once; unsupported prompts cancel without inventing a saved user denial. |
 | Browser result | After approval, read the page heading and return a screenshot. | Fresh visible page evidence, readable received image, existing profile preserved. |
 | Task opening | Send a short request that needs work, then a quick question and a correction. | An unfinished task may send its own specific opening after ten seconds of execution; quick results need no opening. No generic fallback, repeated opening on a correction, stale update after completion/cancellation, or progress while approval needs attention. |
-| Concurrent goals | Start substantial public research, then ask an unrelated question and start a second task. | Two distinct task/thread identities, overlapping work, responsive relay, separate correct deliveries. Each final reply naturally identifies its task and verified outcome without a fixed opener or separate "Done"; blocked work names the task and actual next step. |
+| Concurrent goals | Start substantial public research, then ask an unrelated question and start a second task. | Two distinct task/thread identities, overlapping work, responsive coordinator, separate correct deliveries. Each final reply naturally identifies its task and verified outcome without a fixed opener or separate "Done"; blocked work names the task and actual next step. |
 | Task correction and cancel | Correct one active goal, then cancel a named goal while another is running. | Correction reaches its owner; only the named task stops; unrelated work finishes; no stale result replaces the correction. |
 | Shared Mac | Queue two visible-browser tasks alongside research. | Only one computer owner; second GUI task starts after the first becomes quiescent; background research continues. |
 | Research handoff | Ask a background research task to save its findings as a file. | Same task context resumes with verified computer access; original sources remain available; received file matches the workspace. |
-| Model settings | Change the operator profile while a task runs, then start another task. | Existing turn retains its model; new turn uses the selected profile; relay profile remains independent. |
+| Model settings | Change the worker profile while a task runs, then start another task. | Existing turn retains its model; new turn uses the selected profile; coordinator profile remains independent. |
 | Native screenshot | Ask for a screenshot of the observed browser result. | Current-turn native image is selected explicitly, delivered, and visually checked; no upload server or old capture is substituted. |
-| Native helpers | Give an operator a useful independent research subtask. | Actual native spawn/join/close, parent lineage, configured count/depth, no helper shell/desktop/integrations; unsupported versions continue alone. |
+| Native helpers | Give a worker a useful independent research subtask. | Actual native spawn/join/close, parent lineage, configured count/depth, no helper shell/desktop/integrations; unsupported versions continue alone. |
 | Pause | Start a harmless multi-step task, then send `/stop`. | Prompt cancellation; no later unapproved action or stale artifact delivery. |
 | Restart | Restart with queued work and with a deliberately interrupted test operation. | Queued work survives; ambiguous effects are reported and never automatically replayed. |
 | Preference | Explicitly save a harmless formatting preference, inspect it, then forget it. | Persistence across restart and absence after forgetting; no inferred fact or credential stored. |
@@ -57,7 +57,7 @@ v0.1.8 adds agent-authored delayed task openings and natural task identification
 | Task video | Inventory TextEdit windows, select the exact harmless task window, record it without display fallback, and send it. | Only the selected window appears, visible recording indicator, valid H.264 MP4, exact task outcome, received native attachment, and playback checked on the receiving device. |
 | Video audio | With separate authorization for full-display and system-audio scope, repeat on an explicitly selected display with a brief known sound and `--audio`. | Audible system sound in the received clip, no microphone recording, and playback checked on the receiving device. |
 | Video privacy | Cancel through the indicator and request phone takeover during a harmless recording. | No incomplete clip delivered; input/capture permit closed; discarded files absent. |
-| MCP integration | Configure and authenticate an authorized MCP server in Codex on Steve's Mac, relaunch Steve, and request a harmless read. | The operator discovers the actual tool and returns its observed result; relay and research-helper restrictions remain intact. |
+| MCP integration | Configure and authenticate an authorized MCP server in Codex on Steve's Mac, relaunch Steve, and request a harmless read. | The worker discovers the actual tool and returns its observed result; coordinator and research-helper restrictions remain intact. |
 
 Keep the browser's saved permissions intact unless the user explicitly asks to change them. A blocked origin cannot be retested through another browser surface as a workaround. A new approval test requires the user's chosen permission setting.
 

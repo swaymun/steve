@@ -7,13 +7,13 @@ This is an acceptance checklist, not a claim of completed validation.
 - The CLI reports missing dependencies and human steps accurately; repeated setup preserves configuration.
 - The installed app sends and receives only through an explicitly authorized paired private conversation.
 - Stop, resume, revocation, app restart, watcher recovery, uncertain execution, and partial delivery are exercised on the installed Mac build.
-- Browser work uses the actual installed Computer Use capability. Relay tool restrictions are inspected live; configuration flags alone do not prove universal tool isolation.
-- Independent operators overlap while only one owns the visible Mac. Corrections, named cancellation, queued fresh context, and background-to-computer handoff preserve the intended task and its result.
-- Relay and operator model settings are verified independently. A settings change does not silently change an already running turn.
+- Browser work uses the actual installed Computer Use capability. Coordinator tool restrictions are inspected live; configuration flags alone do not prove universal tool isolation.
+- Independent workers overlap while only one owns the visible Mac. Corrections, named cancellation, queued fresh context, and background-to-computer handoff preserve the intended task and its result.
+- Coordinator and worker model settings are verified independently. A settings change does not silently change an already running turn.
 - A requested screenshot selects a fresh native capture from the current task turn and arrives as a readable iMessage attachment. Unselected captures are not sent.
 - Phone takeover is tested in iPhone Safari against the actual Mac session: login, pause, disconnect, expiry, revocation, and explicit resume with fresh inspection.
 - Persistent preference and schedule operations have durable outcomes, timezone/restart tests, and real message delivery acceptance.
-- User-configured MCP integrations remain available to computer-enabled operators; relay and research-helper restrictions remain intact. Verify new integrations with an authorized read.
+- User-configured MCP integrations remain available to computer-enabled workers; coordinator and research-helper restrictions remain intact. Verify new integrations with an authorized read.
 - The complete public tree and fresh history are scanned for secrets and personal information. Private diagnostics, old handoffs, histories, screenshots, and evaluation PDFs stay private.
 - The original repository remains preserved privately. The public repository has the intended license and only main after landing.
 - Public release artifacts are signed, notarized, stapled, assessed, and hashed as the final downloadable archive. Source builds and locally signed development bundles are not called notarized releases.

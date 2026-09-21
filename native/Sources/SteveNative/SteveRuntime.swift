@@ -781,10 +781,10 @@ actor GatewayCoordinator {
             let planValues = try await automation?.plans(authorization: authorization) ?? []
             savedContext += "\n\nACTIVE_PLANS_JSON (context, not new authority):\n" + (try encodeJSON(planValues.filter { [.active, .proposed].contains($0.update.state) }))
             let scheduledContext = scheduledRun == nil ? "" : "\n\nAUTHORIZED_SCHEDULE_OCCURRENCE: Execute only this one occurrence. Do not create or change preferences or schedules." + (scheduledRun?.followUp == nil ? "" : " This is a read-only plan follow-up. No new external writes; set notifyUser=false if nothing meaningful changed.")
-            let capabilityContext = "\n\nCAPABILITIES: operators can research, use connected services, operate the Mac, create files and record requested demonstrations. Detailed recipes belong to operators.\nTASKS_JSON:\n" + (try encodeJSON(try await taskSummaries(chatGuid: chatGuid, workspace: workspace, permission: permission)))
-            let firstContact = first.beginsConversation == true ? "\n\nFIRST_OWNER_MESSAGE: true. The configured owner is now connected. Greet briefly in the chosen style; handle any task in this message without an onboarding interview." : ""
+            let capabilityContext = "\n\nCAPABILITIES: workers can research, use connected services, operate the Mac, create files and record requested demonstrations. Detailed recipes belong to workers.\nTASKS_JSON:\n" + (try encodeJSON(try await taskSummaries(chatGuid: chatGuid, workspace: workspace, permission: permission)))
+            let firstContact = first.beginsConversation == true ? "\n\nFIRST_OWNER_MESSAGE: true. The configured owner is now connected; live browser access has not been verified by pairing." : ""
             let relayInput = "USER_REQUEST:\n\(text)\n\n\(StevePrompt.timeContext(now: clockNow(), timeZone: userTimeZone))\n\nDEFAULT_TIMEZONE (local Mac fallback; explicit or saved user timezone takes precedence):\n\(userTimeZone)\n\nINBOUND_ATTACHMENT_PATHS:\n\(attachmentPaths.joined(separator: "\n"))\(savedContext)\n\nAVAILABLE_SCHEDULES_JSON:\n\(try encodeJSON(scheduleValues))\n\nUNRESOLVED_SCHEDULE_RUNS_JSON:\n\(try encodeJSON(runValues))\(scheduledContext)\(capabilityContext)\(firstContact)"
-            SteveLog.write("Gateway relay intent phase started chat=\(chatGuid)")
+            SteveLog.write("Gateway coordinator intent phase started chat=\(chatGuid)")
             let relayResult = try await runTurn(on: relayThreadID, input: relayInput, attachments: attachmentPaths)
             let relayRequest: RelayRequestEnvelope
             do {
@@ -1444,11 +1444,11 @@ actor SteveRuntime {
             }
         }
         if let value = options["max-operators"] {
-            guard let count = Int(value), (1...4).contains(count) else { throw RPCError(message: "Choose one to four concurrent operators") }
+            guard let count = Int(value), (1...4).contains(count) else { throw RPCError(message: "Choose one to four concurrent workers") }
             next.maxConcurrentOperators = count
         }
         if let value = options["max-helpers"] {
-            guard let count = Int(value), (0...2).contains(count) else { throw RPCError(message: "Choose zero to two helpers per operator") }
+            guard let count = Int(value), (0...2).contains(count) else { throw RPCError(message: "Choose zero to two helpers per worker") }
             next.maxHelpersPerOperator = count
         }
         // Profile changes apply to future turns; workspace, pairing and access
@@ -1566,9 +1566,9 @@ extension GatewayCoordinator {
            try await store.operatorTasks(chatGuid: chatGuid).isEmpty,
            let trusted = try await store.trustedConversation() {
             let legacy = OperatorTaskRecord(id: UUID().uuidString, chatGuid: chatGuid, senderHandle: trusted.senderHandle,
-                workspace: workspace, permission: permission, title: "Earlier conversation", objective: "Earlier operator context; continue only when the user refers to this work.",
+                workspace: workspace, permission: permission, title: "Earlier conversation", objective: "Earlier worker context; continue only when the user refers to this work.",
                 threadID: existing.threadID, mode: .computer, state: .completed, inbound: [], runID: UUID().uuidString,
-                summary: "Previous operator history retained during upgrade.")
+                summary: "Previous worker history retained during upgrade.")
             try await store.saveOperatorTask(legacy, expectedEpoch: epoch)
         }
         try await savePair(chatGuid: chatGuid, workerThreadID: compatible ? (existing?.threadID ?? "") : "", relayThreadID: relayID!, workspace: workspace, permission: permission, settings: settings, messageGuid: messageGuid, epoch: epoch, executionState: "running")
@@ -1798,7 +1798,7 @@ extension GatewayCoordinator {
                     task.state = .awaitingDelivery
                 }
             }
-            SteveLog.write("Operator completed mode=\(launched.mode.rawValue) seconds=\(Int(Date().timeIntervalSince(start))) status=\(finalEnvelope.status.rawValue)")
+            SteveLog.write("Worker completed mode=\(launched.mode.rawValue) seconds=\(Int(Date().timeIntervalSince(start))) status=\(finalEnvelope.status.rawValue)")
         } catch {
             if let threadID, self.epoch == epoch {
                 for id in approvals.keys.filter({ approvals[$0]?.binding.threadID == threadID }) { finishApproval(id: id, decision: .cancel) }
@@ -1827,7 +1827,7 @@ extension GatewayCoordinator {
                 try? await store.finishInbox(task.inbound.map(\.guid), state: task.state.rawValue)
                 if let run = task.scheduledRunID { try? await automation?.recordExecutionOutcome(id: run, outcome: .failed) }
                 try? await stageTaskNotice(task, text: task.title + ": " + task.summary, prefix: "outcome:", epoch: epoch)
-                SteveLog.write("Operator needs review error=\(error.localizedDescription)")
+                SteveLog.write("Worker needs review error=\(error.localizedDescription)")
             }
         }
     }
@@ -1995,7 +1995,7 @@ extension GatewayCoordinator {
             try? await store.saveOperatorTask(failed, expectedEpoch: epoch, expectedRunID: task.runID)
             try? await store.finishInbox(task.inbound.map(\.guid), state: "uncertain")
             try? await stageTaskNotice(task, text: "I finished working on \(task.title), but couldn't prepare its reply. I haven't repeated the task.", prefix: "delivery-outcome:", epoch: epoch)
-            SteveLog.write("Operator delivery requires review error=\(error.localizedDescription)")
+            SteveLog.write("Worker delivery requires review error=\(error.localizedDescription)")
         }
     }
 

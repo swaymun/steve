@@ -104,4 +104,21 @@ final class OnboardingTests: XCTestCase {
             XCTAssertThrowsError(try SteveCLI.parse(args))
         }
     }
+
+    func testAgentSettingAliasesAndDuplicates() throws {
+        for (preferred, legacy) in SteveSetupOptions.aliases {
+            let current = try SteveCLI.parse(["setup", "--" + preferred, "fixture", "--json"])
+            let old = try SteveCLI.parse(["setup", "--" + legacy, "fixture", "--json"])
+            XCTAssertEqual(current.0.options, old.0.options)
+            XCTAssertTrue(current.1)
+            XCTAssertFalse(current.2)
+            for second in [preferred, legacy] {
+                XCTAssertThrowsError(try SteveCLI.parse(["setup", "--" + preferred, "fixture", "--" + second, "fixture"]))
+                XCTAssertThrowsError(try SteveCLI.parse(["setup", "--" + legacy, "fixture", "--" + second, "different"]))
+            }
+            XCTAssertThrowsError(try SteveCLI.parse(["status", "--" + preferred, "fixture"]))
+            XCTAssertThrowsError(try SteveCLI.parse(["setup", "--" + preferred]))
+        }
+        XCTAssertThrowsError(try SteveCLI.parse(["setup", "--max-helpers", "1", "--max-helpers", "2"]))
+    }
 }

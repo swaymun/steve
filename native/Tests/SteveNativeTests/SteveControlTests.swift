@@ -16,6 +16,11 @@ final class SteveControlTests: XCTestCase {
                         ["open-permission": "full-disk-access", "permission": "danger-full-access"],
                         ["workspace": root.path, "max-operators": "5"],
                         ["workspace": root.path, "max-helpers": "-1"],
+                        ["workspace": "/tmp/should-not-be-created", "max-workers": "5"],
+                        ["workspace": "/tmp/should-not-be-created", "worker-model": "unknown"],
+                        ["workspace": "/tmp/should-not-be-created", "coordinator-effort": "unknown"],
+                        ["workspace": "/tmp/should-not-be-created", "max-workers": "2", "max-operators": "2"],
+                        ["workspace": "/tmp/should-not-be-created", "worker-model": "one", "model": "two"],
                         ["workspace": root.path, "relay-model": "unavailable-model"]] {
             let rejected = await SteveControl.handle(.init(command: "setup", options: options), runtime: runtime) { _ in
                 XCTFail("Opened Settings for an invalid or mixed request")
@@ -30,6 +35,29 @@ final class SteveControlTests: XCTestCase {
         let after = try await store.getSettings()
         XCTAssertEqual(after?.workspaceRoot, before?.workspaceRoot)
         XCTAssertEqual(after?.permissionProfile, before?.permissionProfile)
+    }
+
+    func testStatusKeepsLegacyKeysAndAddsPublicModelCatalog() async throws {
+        let (root, _, runtime, _) = try await settingsRuntime()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let response = await SteveControl.handle(.init(command: "status"), runtime: runtime)
+        for (current, legacy) in [("coordinatorModel", "relayModel"), ("coordinatorEffort", "relayEffort"),
+                                  ("coordinatorServiceTier", "relayServiceTier"), ("workerModel", "operatorModel"),
+                                  ("workerEffort", "operatorEffort"), ("workerServiceTier", "operatorServiceTier"),
+                                  ("maxWorkers", "maxOperators"), ("maxHelpersPerWorker", "maxHelpers")] {
+            XCTAssertNotNil(response.values[current])
+            XCTAssertEqual(response.values[current], response.values[legacy])
+        }
+        XCTAssertEqual(response.models?.count, 0, "An unavailable catalog must not invent supported models")
+        let oldJSON = Data(#"{"state":"ready","summary":"fixture","checks":[],"values":{}}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(SteveControlResponse.self, from: oldJSON).models)
+        var withCatalog = response
+        withCatalog.models = [.init(id: "fixture", model: "fixture", displayName: "Fixture", description: nil,
+                                   supportedReasoningEfforts: [.init(reasoningEffort: "high", description: nil)], isDefault: true)]
+        let encoded = try JSONEncoder().encode(withCatalog)
+        let decoded = try JSONDecoder().decode(SteveControlResponse.self, from: encoded)
+        XCTAssertEqual(decoded.models?.first?.supportedReasoningEfforts.first?.reasoningEffort, "high")
+        XCTAssertEqual(decoded.values, response.values)
     }
 
     private func settingsRuntime() async throws -> (URL, SteveStore, SteveRuntime, Connection) {
@@ -102,6 +130,21 @@ final class SteveControlTests: XCTestCase {
         XCTAssertEqual(saved.effort, "medium")
         XCTAssertEqual(gatewayEpoch, "permission-boundary")
         XCTAssertFalse(boundaryActive, "Model choices apply to future turns without revoking the permission boundary")
+        let status = await SteveControl.handle(.init(command: "status"), runtime: runtime)
+        XCTAssertEqual(status.models?.map(\.id), ["fixture-model", "fixture-next"])
+        XCTAssertEqual(status.values["workerModel"], "fixture-next")
+        // Switching just the model must validate its retained effort before any
+        // unrelated workspace or identity setting can be applied.
+        for option in ["worker-model", "coordinator-model"] {
+            let rejected = await SteveControl.handle(.init(command: "setup", options: [
+                "workspace": root.appendingPathComponent("must-not-be-created").path,
+                option: "fixture-model"
+            ]), runtime: runtime)
+            XCTAssertEqual(rejected.state, "failed")
+            let preserved = try await store.getSettings()
+            XCTAssertEqual(preserved?.workspaceRoot, root.path)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("must-not-be-created").path))
+        }
     }
 
     func testFailedSettingsSaveRestoresPreparedBoundaryAndCanRetry() async throws {

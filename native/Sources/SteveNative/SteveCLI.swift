@@ -1,5 +1,29 @@
 import Foundation
 
+/// Public names map to the existing storage and control protocol keys.
+enum SteveSetupOptions {
+    static let aliases = [
+        "coordinator-model": "relay-model", "coordinator-effort": "relay-effort",
+        "coordinator-service-tier": "relay-service-tier", "worker-model": "model",
+        "worker-effort": "effort", "worker-service-tier": "service-tier",
+        "max-workers": "max-operators"
+    ]
+
+    static func canonical(_ key: String) -> String { aliases[key] ?? key }
+
+    static func normalize(_ options: [String: String]) throws -> [String: String] {
+        var result: [String: String] = [:]
+        for key in options.keys.sorted() {
+            let name = canonical(key)
+            guard result[name] == nil else {
+                throw RPCError(message: "Specify each setup choice only once, including legacy aliases; no changes were applied.")
+            }
+            result[name] = options[key]
+        }
+        return result
+    }
+}
+
 enum SteveCLI {
     static let help = """
     Usage: steve setup|doctor|status|start|stop [--json] [--non-interactive]
@@ -13,9 +37,9 @@ enum SteveCLI {
       steve video cancel [--json]
       setup [--workspace /absolute/path] [--permission PROFILE]
             [--owner ADDRESS] [--agent-name NAME] [--personality TEXT]
-            [--model ID] [--effort EFFORT] [--service-tier standard|fast]
-            [--relay-model auto|ID] [--relay-effort EFFORT] [--relay-service-tier standard|fast]
-            [--max-operators 1...4] [--max-helpers 0...2]
+            [--worker-model ID] [--worker-effort EFFORT] [--worker-service-tier standard|fast]
+            [--coordinator-model auto|ID] [--coordinator-effort EFFORT] [--coordinator-service-tier standard|fast]
+            [--max-workers 1...4] [--max-helpers 0...2]
             [--login] [--pair] [--tailscale-connect] [--phone-access]
       setup --open-permission TARGET [--json] [--non-interactive]
         TARGET: full-disk-access, messages-automation,
@@ -30,7 +54,11 @@ enum SteveCLI {
     or macOS permission prompts. --non-interactive never waits for terminal input.
     --open-permission opens Settings for a human grant; use it separately from
     other setup options. Ordinary setup and doctor do not open Settings.
-    start resumes the operator; stop pauses and cancels it. It does not quit the app.
+    --max-helpers sets research helpers per eligible worker. Only one worker controls
+    the visible Mac at a time. setup/doctor/status JSON includes the model catalog.
+    Legacy --model, --effort, --service-tier, --relay-* and --max-operators flags
+    remain supported. Do not combine aliases for the same choice.
+    start resumes work; stop pauses and cancels it. It does not quit the app.
     JSON states: ready, needs_user_action, blocked, failed. Exit: 0 ready, 2 attention,
     1 error. Do not share setup output containing a live pairing code.
     """
@@ -87,10 +115,14 @@ enum SteveCLI {
                 guard command == "setup" else { throw RPCError(message: "\(arg) is a setup option.") }
                 request.options[String(arg.dropFirst(2))] = "true"
             case "--workspace", "--permission", "--model", "--effort", "--service-tier",
-                 "--relay-model", "--relay-effort", "--relay-service-tier", "--max-operators", "--max-helpers":
+                 "--relay-model", "--relay-effort", "--relay-service-tier", "--max-operators", "--max-helpers",
+                 "--coordinator-model", "--coordinator-effort", "--coordinator-service-tier",
+                 "--worker-model", "--worker-effort", "--worker-service-tier", "--max-workers":
                 guard command == "setup", index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else { throw RPCError(message: "\(arg) requires a value on setup.") }
+                let key = SteveSetupOptions.canonical(String(arg.dropFirst(2)))
+                guard request.options[key] == nil else { throw RPCError(message: "Specify each setup choice only once, including legacy aliases.") }
                 index += 1
-                request.options[String(arg.dropFirst(2))] = arguments[index]
+                request.options[key] = arguments[index]
             case "--open-permission":
                 guard command == "setup", index + 1 < arguments.count,
                       StevePermissionTarget(rawValue: arguments[index + 1]) != nil,

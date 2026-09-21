@@ -4,9 +4,30 @@ The default path is **install and launch → pair iMessage → enable native Com
 
 Use the tested account arrangement: Messages on Steve's Mac is signed in to a separate account from the person texting Steve. Same-account self-messaging is outside this setup flow; messages marked as sent by the Mac's own account are ignored. Keep the Mac awake and Steve running in its signed-in user session.
 
+## Guide the first conversation
+
+The local setup agent owns onboarding through the first useful result. Start by explaining the purpose in ordinary language: finish the access checks together while the user is at the Mac, so a request sent later does not get stuck behind a permission prompt. Offer an agent name and personality without making either a required interview.
+
+Use Astra in the local Codex desktop app when available. Ask short structured questions using the host's question tool; ordinary chat is the fallback. Do not assume the tool exists just because a model was selected. Ask one choice at a time, wait for permission confirmations, and continue independent inspection while waiting. Structured asynchronous questions depend on the installed host and model catalog ([Codex documentation](https://learn.chatgpt.com/docs/changelog)).
+
+1. Install, launch, and inspect Steve using the steps below. Explain each required grant when it is needed: Steve reads incoming Messages with Full Disk Access and sends replies through Messages Automation; native Computer Use separately needs Screen Recording to see apps and Accessibility to operate them. Open one pane at a time, identify the exact app, and let the human grant access. Reuse working grants.
+2. After each human action, continue the same setup, recheck once, and handle the next remaining step. Relaunch Steve after Full Disk Access when needed. Do not finish the task with an unexplained command or a generic list of permissions.
+3. Configure the one owner the user chose, then ask them to send a short greeting or a useful first request to the verified receiving address. Observe whether the exact conversation connects and the reply arrives. The Automation consent may appear on this first authorized reply; guide that handoff without sending an extra probe.
+4. If the user starts with a greeting, offer one harmless browser sample in ordinary words. Let their acceptance start it through Steve. If their first message already asks for a browser task, use that as the sample. A plain “yes” should be enough; do not require command syntax or a prescribed technical prompt. When the installed release does not offer a sample itself, the setup agent supplies this invitation and stays with the user through the task.
+5. Observe Steve's own native Computer Use task and the received result. Do not substitute a browser task run directly by the setup agent. If access fails, explain the specific missing grant, open its pane, and continue the same task after the human acts. Only then confirm that messaging and browser control worked, explain that the Mac must stay awake and signed in with Steve running, and invite the next ordinary request.
+
+Keep the welcome and replies model-written, brief, and specific to what actually worked. Avoid a fixed greeting script, repeated acknowledgments, or a blanket claim that everything is ready. Video, private phone control, email and calendar connections are separate choices; offer to set them up before the user leaves only when wanted. A browser test does not verify those capabilities.
+
+
+### When the first message gets no reply
+
+Check Steve's status and required blockers first. If it is waiting for the owner, verify the actual sender of that specific newly sent test message on the receiving Mac, using Messages or narrowly scoped local diagnostics. Keep addresses and message evidence private; do not inspect unrelated conversations. The sending device's “Start new conversations from” preference alone is insufficient: an existing conversation or account issue can still send from an email instead of the chosen number.
+
+Explain the mismatch and let the user choose to correct the sending identity or replace the sole owner with the observed address. Never silently broaden the allowlist. Apply an owner change only with explicit approval and while still unpaired; changing an already connected owner requires the documented disconnect flow. Ask for a fresh message afterward, since older messages must not become newly authorized. If the sender is correct, diagnose the actual Messages/Automation or task error rather than repeatedly asking for Full Disk Access. Preserve an unresolved blocker and the exact human next step; do not claim onboarding is complete.
+
 ## Install a release
 
-The [v0.1.8 development preview](https://github.com/swaymun/steve/releases/tag/v0.1.8) contains a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Native Computer Use has separate availability and macOS requirements; inspect its installed app and supported Codex setup flow. Intel builds have not been validated.
+The [v1.0.0 release](https://github.com/swaymun/steve/releases/tag/v1.0.0) contains a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Native Computer Use has separate availability and macOS requirements; inspect its installed app and supported Codex setup flow. Intel builds have not been validated.
 
 ### Discover the right download
 
@@ -14,7 +35,7 @@ Steve is currently distributed as a GitHub prerelease. Use the [published releas
 
 An agent should inspect published, non-draft releases in descending version order and choose the newest compatible one. Check the Mac's architecture and macOS version against the release notes, and require both `Steve-macOS.zip` and `Steve-macOS.zip.sha256` in that same release. GitHub's automatic source ZIP/tar archives are not the app. If no compatible app exists, explain the source-build option rather than claiming there is no release.
 
-For this version: [download the app ZIP](https://github.com/swaymun/steve/releases/download/v0.1.8/Steve-macOS.zip) and [its checksum](https://github.com/swaymun/steve/releases/download/v0.1.8/Steve-macOS.zip.sha256). In the download folder:
+For this version: [download the app ZIP](https://github.com/swaymun/steve/releases/download/v1.0.0/Steve-macOS.zip) and [its checksum](https://github.com/swaymun/steve/releases/download/v1.0.0/Steve-macOS.zip.sha256). In the download folder:
 
 ```sh
 shasum -a 256 -c Steve-macOS.zip.sha256
@@ -43,7 +64,7 @@ If the app is still starting and the socket is unavailable, check that it launch
 
 The CLI talks to a user-owned local socket in the running app. That app owns the macOS permission grants. The CLI does not independently read Messages or copy Codex credentials.
 
-Responses contain `state`, `summary`, `checks`, and optional `values`. States are `ready`, `needs_user_action`, `blocked`, and `failed`; exit codes are 0 for ready, 2 for attention, and 1 for errors. Inspect the JSON even when exit code 2 is returned. `--json` and `--non-interactive` never prompt for terminal input; an explicit permission-opening command still opens macOS Settings.
+Responses contain `state`, `summary`, `checks`, and optional `values`, `tasks`, and `models`. The `models` catalog includes IDs, display names and supported reasoning levels from the signed-in account. An empty catalog is not permission to guess: finish Codex login and refresh doctor first. Current coordinator/worker values have legacy aliases for older clients. States are `ready`, `needs_user_action`, `blocked`, and `failed`; exit codes are 0 for ready, 2 for attention, and 1 for errors. Inspect the JSON even when exit code 2 is returned. `--json` and `--non-interactive` never prompt for terminal input; an explicit permission-opening command still opens macOS Settings.
 
 ### 1. Account and access choices
 
@@ -56,6 +77,8 @@ steve setup --workspace "$HOME/SteveWorkspace" --permission workspace-write --js
 The profiles are Read Only (`read-only`), Workspace Write (`workspace-write`), and Full Access (`danger-full-access`). Full Access allows routine commands without individual command approval, but does not authorize unrelated purchases, bookings, messages, or account changes. Do not enable it silently. Use the existing browser profile. Select models/effort only from the account's current catalog.
 
 Reuse the existing Codex sign-in. Only if sign-in is missing, run `steve setup --login --non-interactive --json` and let the user finish the official browser flow. Keep returned login URLs private. Login pauses Steve; after authentication, run doctor, then `steve start --json` when ready to resume. Never ask the user to paste ChatGPT tokens or passwords.
+
+Then offer recommended models or customization. For a new installation, recommend a **Luna Low Standard coordinator, Luna Xhigh Fast workers, two concurrent workers, and one research helper per eligible worker**. Fast consumes more allowance. Apply this recommendation only if accepted and supported by the returned `models` catalog; do not overwrite an existing profile by default. For customization, ask about the worker model first, then reasoning/speed, coordinator, and concurrency as needed. A user who accepts the recommendation does not need a separate question for every setting. See [model and concurrency settings](#coordinator-and-worker-settings).
 
 ### 2. Messages access and pairing
 
@@ -142,21 +165,23 @@ Use normal messages for tasks and “yes”/“no” for a pending decision. Int
 
 `steve stop` cancels active and queued requests and pauses Steve; `steve start` accepts new work again. In iMessage, say “stop” or “resume.” These do not quit or relaunch the app; use its Quit action to shut down cleanly.
 
-## Relay and operator settings
+## Coordinator and worker settings
 
-The relay keeps the iMessage conversation and routes work. Its default is **Luna, Low, Standard** when that model is available in the signed-in Codex account. Operators do the work using their separate model, reasoning, and service-tier settings. If the automatic relay model is unavailable, Steve uses the selected operator model and effort; an explicitly selected unavailable relay model fails clearly.
+The coordinator keeps the iMessage conversation and routes work. Its default is **Luna, Low, Standard** when that model is available in the signed-in Codex account. Workers do the work using their separate model, reasoning, and service-tier settings. If the automatic coordinator model is unavailable, Steve uses the selected worker model and effort; an explicitly selected unavailable coordinator model fails clearly.
 
 Change these independently in Steve's menu-bar settings or through the installed CLI:
 
 ```sh
-steve setup --relay-model gpt-5.6-luna --relay-effort low --relay-service-tier standard --json
-steve setup --model gpt-5.6-luna --effort xhigh --service-tier fast --json
-steve setup --max-operators 2 --max-helpers 1 --json
+steve setup --coordinator-model gpt-5.6-luna --coordinator-effort low --coordinator-service-tier standard --json
+steve setup --worker-model gpt-5.6-luna --worker-effort xhigh --worker-service-tier fast --json
+steve setup --max-workers 2 --max-helpers 1 --json
 ```
 
-Use `--relay-model auto` to restore automatic selection. The model and effort must be supported by the current account. Standard is the default service tier; Fast consumes more Codex usage. Changing agent settings applies to future turns and preserves pairing, permissions, schedules, and work already running.
+The v1.0 CLI prefers `--worker-model`, `--worker-effort`, `--worker-service-tier`, `--coordinator-model`, `--coordinator-effort`, `--coordinator-service-tier`, and `--max-workers`. Legacy `--model`, `--effort`, `--service-tier`, `--relay-*`, and `--max-operators` still work; specify a choice only once. Existing settings and storage keys are preserved.
 
-Steve defaults to two active operators (configurable from one to four) and one native research helper per background operator (zero to two). Helpers have one level of delegation and only public web research tools. When the installed App Server cannot support helper lineage, the operator works alone. Computer tasks run one at a time; other research can continue. Helpers are disabled while an operator owns the Mac.
+Use `--coordinator-model auto` to restore automatic selection. The model and effort must be supported by the current account. Standard is the default service tier; Fast consumes more Codex usage. Changing agent settings applies to future turns and preserves pairing, permissions, schedules, and work already running.
+
+Steve defaults to two active workers (configurable from one to four) and one native research helper per background worker (zero to two). Helpers have one level of delegation and only public web research tools. When the installed App Server cannot support helper lineage, the worker works alone. Computer tasks run one at a time; other research can continue. Helpers are disabled while a worker owns the Mac.
 
 Ask naturally: “Also compare the train options,” “For the hotel search, keep it under $200,” or “Cancel the hotel search.” Steve keeps unrelated goals separate, routes corrections to their owner, and asks which task only when the reference is ambiguous. `/stop` cancels active and queued requests and pauses scheduled execution. It does not delete schedules. Resuming does not restart cancelled requests. An uncertain action is never automatically repeated after a crash or interruption.
 
@@ -175,6 +200,8 @@ The installer preserves data and workspace, defaults to `~/Applications/Steve.ap
 
 ## Optional Tailscale setup
 
+Offer this during onboarding: “Would you like to finish website sign-ins from your phone when you’re away?” If the user skips it, ordinary messaging and Computer Use can still be verified, but explain that future sign-ins may require returning to the Mac. If accepted, stay through both devices’ setup and an actual control/continue check; a connected Mac alone is insufficient.
+
 Basic iMessage operation does not require Tailscale. Phone browser access requires a private network connection. The [recommended standalone macOS app](https://tailscale.com/docs/install/mac) includes the CLI. Install Tailscale on the phone too, use your own account, and complete the operating system's VPN approval. The account and VPN setup remain human steps.
 
 ```sh
@@ -186,6 +213,8 @@ The explicit connect flag runs a bounded `tailscale up` and reads its status. It
 
 ## Phone control in Safari
 
+Open `steve-screen-recording` and `steve-accessibility` with `setup --open-permission TARGET --json`, one at a time, when those grants are missing. Wait for the user’s confirmation before rechecking. Preserve Computer Use’s separate existing grants.
+
 After connecting Tailscale on both devices, enable private HTTPS and generate a one-time link:
 
 ```sh
@@ -196,7 +225,7 @@ steve phone --disconnect --json
 
 Once phone access is configured, ask Steve in the paired iMessage conversation for a phone-control link. If Steve is paused, first say "resume", then ask for the link. Steve sends a private, one-use Safari link that expires after two minutes. The link is not included in model inputs or Steve's SQLite outbox; it remains in your private Messages history. Requesting a link does not grant control or pause the worker; claiming it does. If delivery is uncertain or the link expires, ask for a new one.
 
-For a login, ask Steve to open the site's sign-in page. When the operator verifies that page and phone access is configured, Steve automatically offers the private link. Open it in Safari with Tailscale connected and tap **Take control**. The verified login briefly reserves computer control so another task cannot replace the page. You are operating the same browser session on the Mac, so your successful login remains available there. Tailscale supplies the private network connection behind the URL; it is required on the phone even though the interface is a web page.
+For a login, ask Steve to open the site's sign-in page. When the worker verifies that page and phone access is configured, Steve automatically offers the private link. Open it in Safari with Tailscale connected and tap **Take control**. The verified login briefly reserves computer control so another task cannot replace the page. You are operating the same browser session on the Mac, so your successful login remains available there. Tailscale supplies the private network connection behind the URL; it is required on the phone even though the interface is a web page.
 
 The setup command uses an unused HTTPS port (8443 or 10000), preserves other Serve routes, and refuses a conflicting or publicly exposed Funnel route. Tailscale may require enabling HTTPS in your account before setup succeeds. The backend listens only on loopback. The link contains a short-lived secret: keep it private. You can also show a QR code from Steve’s connected-phone menu.
 
@@ -206,7 +235,7 @@ Taking control pauses and drains the worker. Disconnect, expiry, revocation, and
 
 ## Video evidence
 
-For an explicitly requested task demonstration, the native recorder creates H.264 MP4 video. Exact-window capture is the default: inventory the named app's visible windows, choose the verified task window, and record only that window. Steve decodes the output locally and checks size and duration before returning a workspace artifact. The relay can select that artifact for native iMessage delivery. Video is evidence of what happened; it does not replace checking the task’s actual result.
+For an explicitly requested task demonstration, the native recorder creates H.264 MP4 video. Exact-window capture is the default: inventory the named app's visible windows, choose the verified task window, and record only that window. Steve decodes the output locally and checks size and duration before returning a workspace artifact. The coordinator can select that artifact for native iMessage delivery. Video is evidence of what happened; it does not replace checking the task’s actual result.
 
 ```sh
 steve video windows --app BUNDLE_ID --json
@@ -235,11 +264,11 @@ Steve can adopt a dated plan from an ordinary request and perform read-only foll
 
 ## MCP integrations
 
-Steve's computer-enabled operators inherit MCP servers configured in Codex on the Mac running Steve. Add a compatible server through Codex's normal MCP configuration, complete its authentication, and verify it with `codex mcp list`. User configuration normally lives in `~/.codex/config.toml`; trusted workspace configuration can also apply. See the [official Codex MCP setup guide](https://developers.openai.com/codex/mcp/) for local STDIO and remote HTTP servers, authentication, and tool settings.
+Steve's computer-enabled workers inherit MCP servers configured in Codex on the Mac running Steve. Add a compatible server through Codex's normal MCP configuration, complete its authentication, and verify it with `codex mcp list`. User configuration normally lives in `~/.codex/config.toml`; trusted workspace configuration can also apply. See the [official Codex MCP setup guide](https://developers.openai.com/codex/mcp/) for local STDIO and remote HTTP servers, authentication, and tool settings.
 
 You can ask your setup agent: “Connect this service's MCP server to Codex on this Mac, then verify Steve can use it.” After current tasks finish, quit and relaunch Steve to reload configuration, then try a harmless read through the paired chat. Install and authenticate on Steve's Mac under its macOS user account; configuring a different computer does not configure Steve. Local server executables and required environment variables must be available to the running app, not only an interactive Terminal session.
 
-The relay and background research helpers do not get integration access; Steve routes connected work to an operator with that capability. Each server still needs compatible tools, its own dependencies and sign-in, and the appropriate account access. Adding an integration does not authorize unrelated messages, purchases, or account changes.
+The coordinator and background research helpers do not get integration access; Steve routes connected work to a worker with that capability. Each server still needs compatible tools, its own dependencies and sign-in, and the appropriate account access. Adding an integration does not authorize unrelated messages, purchases, or account changes.
 
 ## Troubleshooting and data
 
@@ -247,7 +276,7 @@ If the CLI cannot connect, open the installed app in the active user session. A 
 
 Codex credentials belong to Codex. Steve stores settings, exact pairing, queue state, and thread IDs in `~/.steve/steve.sqlite3`. The default workspace is `~/.steve/workspace`; existing configured workspaces are preserved. Logs are under `~/Library/Logs/Steve`. Treat all of these as private. Raw benchmark histories stay local.
 
-From v0.1.7, Steve's App Server uses `~/.steve/runtime` for its sessions and task database, so internal relay, operator and helper chats stay out of the desktop Codex task list. It reuses existing Codex configuration, plugins, skills and file-based authentication through local links; it never copies credentials or the desktop task database. Keychain-only setups may need to sign in once through Steve. Native Computer Use keeps its existing installation and permissions. [Codex state locations](https://learn.chatgpt.com/docs/config-file/environment-variables#core-locations).
+From v0.1.7, Steve's App Server uses `~/.steve/runtime` for its sessions and task database, so internal coordinator, worker and helper chats stay out of the desktop Codex task list. It reuses existing Codex configuration, plugins, skills and file-based authentication through local links; it never copies credentials or the desktop task database. Keychain-only setups may need to sign in once through Steve. Native Computer Use keeps its existing installation and permissions. [Codex state locations](https://learn.chatgpt.com/docs/config-file/environment-variables#core-locations).
 
 On upgrade, a missing private thread can import its exact Steve-originated legacy transcript when resumed. Existing desktop entries are left intact; no unrelated chats are imported or deleted. The configured workspace and Steve's durable queue, preferences and schedules remain unchanged. Do not point the runtime at the desktop Codex home or link its session/database storage there.
 
