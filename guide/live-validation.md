@@ -18,7 +18,7 @@ Treat onboarding as a seventeenth **Steve-specific** dimension alongside the 16 
 
 - Fresh installation: choose one owner during setup, optionally name the agent and describe its personality. Defaults work without extra questions.
 - Start with “hey” or “Open example.com.” No code, command syntax or technical coaching on an owner-capable build. The greeting is generated in the chosen style; an actual first task is preserved and executed.
-- Inspect both agent profiles' instructions and actual replies for the chosen identity. Runtime status, security errors and transport acknowledgments remain factual fixed messages; task outcomes must not be scripted by test topic.
+- Inspect both agent profiles' instructions and actual replies for the chosen identity. Runtime status and security errors remain factual fixed messages; task openings, progress and outcomes come from the agent, without scripted task responses.
 - Reject other senders, SMS, groups, sent-by-me messages, old synced history and a second private chat. An owner change cannot silently replace a connected conversation.
 - Restart before and after first contact; repeat installation; change name/style; preserve pairing, settings, grants, queued tasks and workspace. Disconnect must remove automatic owner authorization as well as the chat binding.
 - Test a missing Messages grant, denied Automation and an unavailable model. Explain the real next step and retain the first task without falsely declaring setup complete.
@@ -38,6 +38,7 @@ The v0.1.7 runtime checks also verified that internal conversations stay in Stev
 | Readable documents | Ask for a short guide without specifying a file format, then explicitly request its Markdown source. | First reply uses plain text and delivers a readable PDF with intact content and links; Markdown is sent only for the explicit follow-up. Inspect the actual received files. |
 | Browser approval | Request a public HTTPS page through the installed official tool with site approval set to ask. | Scoped approval reaches the phone; explicit decision resolves once; unsupported prompts cancel without inventing a saved user denial. |
 | Browser result | After approval, read the page heading and return a screenshot. | Fresh visible page evidence, readable received image, existing profile preserved. |
+| Task opening | Send a short request that needs work, then a quick question and a correction. | An unfinished task may send its own specific opening after ten seconds of execution; quick results need no opening. No generic fallback, repeated opening on a correction, stale update after completion/cancellation, or progress while approval needs attention. |
 | Concurrent goals | Start substantial public research, then ask an unrelated question and start a second task. | Two distinct task/thread identities, overlapping work, responsive relay, separate correct deliveries. |
 | Task correction and cancel | Correct one active goal, then cancel a named goal while another is running. | Correction reaches its owner; only the named task stops; unrelated work finishes; no stale result replaces the correction. |
 | Shared Mac | Queue two visible-browser tasks alongside research. | Only one computer owner; second GUI task starts after the first becomes quiescent; background research continues. |

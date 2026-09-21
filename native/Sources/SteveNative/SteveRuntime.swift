@@ -82,7 +82,7 @@ actor GatewayCoordinator {
     private let debounce: Duration
     private let retryDelay: Duration
     private let acknowledgementDelay: Duration
-    private var acknowledgedMessages = Set<String>()
+    private var pendingProgressRuns = Set<String>()
     private let takeoverLifetime: TimeInterval
     private let automation: SteveUserAutomationStore?
     private let schedulerInterval: Duration
@@ -733,12 +733,6 @@ actor GatewayCoordinator {
         let chatGuid = first.chatGuid
         let text = inbound.map(\.text).joined(separator: "\n")
         let attachmentPaths = inbound.flatMap(\.attachmentPaths)
-        let acknowledgementID = UUID()
-        inFlightTasks[acknowledgementID] = Task {
-            defer { self.inFlightTasks.removeValue(forKey: acknowledgementID) }
-            try? await Task.sleep(for: acknowledgementDelay)
-            if !Task.isCancelled { await self.acknowledgeIfPending(first, epoch: epoch) }
-        }
         var actionsStarted = false
         var scheduledRun: UserScheduleRun?
         do {
@@ -1206,14 +1200,13 @@ actor GatewayCoordinator {
         let settings = try await store.getSettings() ?? defaultSettings()
         try check(epoch, control: part.isControl)
         if part.id.hasPrefix("ack:") {
-            let guid = String(part.id.dropFirst(4))
-            guard let state = try await store.queueState("inbound:" + guid), ["pending", "running"].contains(state) else {
-                try await store.failOutboundPart(part); return
-            }
+            // Retire any generic timer acknowledgement queued by an older build.
+            try await store.failOutboundPart(part); return
         }
         if part.id.hasPrefix("progress:") {
             let fields = part.id.split(separator: ":")
-            guard fields.count == 4, let task = try await store.operatorTask(id: String(fields[1])), task.runID == String(fields[2]), task.state == .running else {
+            guard fields.count == 4, let task = try await store.operatorTask(id: String(fields[1])), task.runID == String(fields[2]), task.state == .running,
+                  !approvals.values.contains(where: { $0.binding.taskID == task.id }) else {
                 try await store.failOutboundPart(part); return
             }
         }
@@ -1700,6 +1693,7 @@ extension GatewayCoordinator {
     }
 
     private func runOperator(_ launched: OperatorTaskRecord, settings: Settings, epoch: String) async {
+        let openingDeadline = ContinuousClock.now.advanced(by: acknowledgementDelay)
         var threadID: String?
         var actionsStarted = false
         var quiescent = true
@@ -1737,7 +1731,8 @@ extension GatewayCoordinator {
             let originalContext = "\n\nPRIOR_USER_MESSAGES_JSON:\n" + (try encodeJSON(current.originalMessages ?? current.inbound))
             let result = try await codex.runTurn(threadID: threadID, text: current.objective + originalContext, attachmentPaths: current.inbound.flatMap(\.attachmentPaths), workspace: current.workspace,
                 model: settings.model, effort: settings.effort, serviceTier: settings.serviceTier, onProgress: { event in
-                    await self.operatorProgress(taskID: launched.id, runID: launched.runID, text: event.text, epoch: epoch)
+                    guard event.phase == .commentary else { return }
+                    await self.receiveOperatorProgress(taskID: launched.id, runID: launched.runID, text: event.text, epoch: epoch, notBefore: openingDeadline)
                 }, onTurnStarted: { turnID in
                     await self.operatorTurnStarted(taskID: launched.id, epoch: epoch, threadID: threadID, turnID: turnID)
                 })
@@ -1848,39 +1843,42 @@ extension GatewayCoordinator {
         return (old + new).filter { seen.insert($0.guid).inserted }
     }
 
-    private func acknowledgeIfPending(_ message: SteveInboundMessage, epoch: String) async {
-        do {
-            try check(epoch)
-            guard !message.guid.hasPrefix("schedule:"), !acknowledgedMessages.contains(message.guid),
-                  let state = try await store.queueState("inbound:" + message.guid), ["pending", "running"].contains(state),
-                  !approvals.values.contains(where: { $0.binding.message.guid == message.guid }) else { return }
-            let settings = try await store.getSettings()
-            acknowledgedMessages.insert(message.guid)
-            if let task = try await store.operatorTasks(chatGuid: message.chatGuid).first(where: { $0.inbound.contains(where: { $0.guid == message.guid }) && [.running, .queued].contains($0.state) }) {
-                let now = clockNow()
-                try await store.updateOperatorTask(id: task.id, expectedEpoch: epoch, expectedRunID: task.runID) { $0.acknowledgementSentAt = now; $0.lastProgressAt = now }
+    private func receiveOperatorProgress(taskID: String, runID: String, text: String, epoch: String, notBefore: ContinuousClock.Instant) async {
+        do { try check(epoch) } catch { return }
+        guard let message = ConversationProgress.safeMessage(text) else { return }
+        guard ContinuousClock.now < notBefore else {
+            await operatorProgress(taskID: taskID, runID: runID, text: message, epoch: epoch)
+            return
+        }
+        // Hold the agent's opening for slow tasks without blocking its tools.
+        // No generated opening means no acknowledgement; never invent a fallback.
+        guard pendingProgressRuns.insert(runID).inserted else { return }
+        let timerID = UUID()
+        inFlightTasks[timerID] = Task {
+            defer {
+                self.pendingProgressRuns.remove(runID)
+                self.inFlightTasks.removeValue(forKey: timerID)
             }
-            let part = SteveStore.OutboundPart(id: "ack:" + message.guid, chatGuid: message.chatGuid, recipient: message.senderHandle, replyTo: message.guid, inboxGUIDs: [], text: "I’m on it.", attachmentPath: nil, workspace: settings?.workspaceRoot, permission: settings?.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")))
-            try await store.stageDelivery([part], inboxGUIDs: [], expectedEpoch: epoch)
-            scheduleDelivery()
-        } catch { }
+            do { try await Task.sleep(until: notBefore, clock: .continuous) }
+            catch { return }
+            await self.operatorProgress(taskID: taskID, runID: runID, text: message, epoch: epoch)
+        }
     }
 
-    private func operatorProgress(taskID: String, runID: String, text: String, epoch: String, acknowledgement: Bool = false) async {
+    private func operatorProgress(taskID: String, runID: String, text: String, epoch: String) async {
         do {
             try check(epoch)
-            guard let message = ConversationProgress.safeMessage(text) else { return }
+            guard let message = ConversationProgress.safeMessage(text),
+                  !approvals.values.contains(where: { $0.binding.taskID == taskID }) else { return }
             let now = clockNow()
             let task = try await store.updateOperatorTask(id: taskID, expectedEpoch: epoch, expectedRunID: runID) { current in
                 guard current.state == .running, let first = current.inbound.first, !first.guid.hasPrefix("schedule:"), message != current.lastProgress else { throw CancellationError() }
-                if acknowledgement {
-                    guard current.acknowledgementSentAt == nil, current.lastProgressAt == nil else { throw CancellationError() }
+                if current.lastProgressAt == nil {
                     current.acknowledgementSentAt = now
                 } else if let last = current.lastProgressAt, now.timeIntervalSince(last) < 60 { throw CancellationError() }
                 current.lastProgressAt = now; current.lastProgress = message
             }
             guard let first = task.inbound.first else { return }
-            acknowledgedMessages.insert(first.guid)
             let part = SteveStore.OutboundPart(id: "progress:" + task.id + ":" + runID + ":" + UUID().uuidString, chatGuid: task.chatGuid, recipient: task.senderHandle, replyTo: first.guid, inboxGUIDs: [], text: message, attachmentPath: nil, workspace: task.workspace, permission: task.permission)
             try await store.stageDelivery([part], inboxGUIDs: [], expectedEpoch: epoch)
             scheduleDelivery()

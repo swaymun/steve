@@ -103,6 +103,14 @@ private actor FixtureCodex: GatewayCodexClient {
     var workerResumeError: String?
     func failWorkerResume(_ message: String) { workerResumeError = message }
     var results: [String]
+    private var openingEvents: [CodexTurnEvent] = []
+    private var progressHandler: (@Sendable (CodexTurnEvent) async -> Void)?
+    func setOpening(_ texts: [String]) { openingEvents = texts.map { .init(phase: .commentary, text: $0) } }
+    func emitProgress(_ text: String, phase: CodexMessagePhase = .commentary) async { await progressHandler?(.init(phase: phase, text: text)) }
+    private func beginProgress(_ handler: (@Sendable (CodexTurnEvent) async -> Void)?) async {
+        progressHandler = handler
+        for event in openingEvents { await handler?(event) }
+    }
     init(_ results: [String]) { self.results = results }
     func appendResults(_ values: [String]) { results.append(contentsOf: values) }
     func hold() { holdWorker = true }
@@ -115,6 +123,12 @@ private actor FixtureCodex: GatewayCodexClient {
     }
     func compactThread(threadID: String) {}
     func interruptTurn(threadID: String, turnID: String) {}
+    func runTurn(threadID: String, text: String, attachmentPaths: [String], workspace: String?, model: String, effort: String, serviceTier: SteveServiceTier, onProgress: (@Sendable (CodexTurnEvent) async -> Void)?, onTurnStarted: @escaping @Sendable (String) async -> Void) async throws -> CodexTurnResult {
+        try await runTurn(threadID: threadID, text: text, attachmentPaths: attachmentPaths, workspace: workspace, model: model, effort: effort, serviceTier: serviceTier, onTurnStarted: { turnID in
+            await onTurnStarted(turnID)
+            await self.beginProgress(onProgress)
+        })
+    }
     func runTurn(threadID: String, text: String, attachmentPaths: [String], workspace: String?, model: String, effort: String, serviceTier: SteveServiceTier, onTurnStarted: @escaping @Sendable (String) async -> Void) async throws -> CodexTurnResult {
         turnTiers.append(serviceTier)
         inputs.append(text)
@@ -1415,14 +1429,92 @@ final class GatewayLifecycleTests: XCTestCase {
         XCTAssertTrue(try String(contentsOfFile: settings.workspaceRoot! + "/STEVE_MEMORY.md", encoding: .utf8).contains("vegetarian"))
     }
 
-    func testAcknowledgementOnlyOnceAndNeverCompletesOriginalRequest() async throws {
-        let (store, gateway, messages, codex) = try await setup([relay, worker], acknowledgementDelay: .milliseconds(25))
+    func testAgentOpeningIsSpecificDeduplicatedAndDoesNotCompleteRequest() async throws {
+        let clock = FixtureClock()
+        let opening = "I'll compare dinner options for Friday."
+        let milestone = "I found two options within your budget."
+        let (store, gateway, messages, codex) = try await setup([relay, worker], acknowledgementDelay: .milliseconds(25), clock: clock)
+        await codex.setOpening([opening, opening])
         await codex.hold(); await gateway.start(); await gateway.receive(inbound("slow"))
-        try await eventually { await messages.sent.contains("I’m on it.") }
-        try await Task.sleep(for: .milliseconds(100))
-        let sent = await messages.sent
-        XCTAssertEqual(sent.filter { $0 == "I’m on it." }.count, 1)
+        try await eventually { await messages.sent.contains(opening) }
+        await codex.emitProgress(milestone) // Too soon after the opening.
+        var sent = await messages.sent
+        XCTAssertEqual(sent, [opening])
+        clock.advance(61)
+        await codex.emitProgress(opening) // Repeated model event is still a duplicate.
+        await codex.emitProgress("Final content must not become progress.", phase: .finalAnswer)
+        await codex.emitProgress(milestone)
+        try await eventually { await messages.sent.contains(milestone) }
+        sent = await messages.sent
+        XCTAssertEqual(sent, [opening, milestone])
         let state = try await store.queueState("inbound:slow")
+        XCTAssertEqual(state, "running")
+        await gateway.stop()
+    }
+
+    func testMissingOrGenericOpeningHasNoCannedFallback() async throws {
+        for opening in [[], ["I'm on it.", "Got it!"]] {
+            let (_, gateway, messages, codex) = try await setup([relay, worker], acknowledgementDelay: .milliseconds(20))
+            await codex.setOpening(opening)
+            await codex.hold(); await gateway.start(); await gateway.receive(inbound())
+            try await eventually { await codex.turns == 2 }
+            try await Task.sleep(for: .milliseconds(60))
+            let sent = await messages.sent
+            XCTAssertTrue(sent.isEmpty)
+            let lateOpening = "I'll check which hotels are available for your dates."
+            await codex.emitProgress(lateOpening)
+            try await eventually { await messages.sent.contains(lateOpening) }
+            await gateway.stop()
+        }
+    }
+
+    func testQuickResultSuppressesOpeningAndLateProgress() async throws {
+        let delivery = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["The heading is Example Domain."]}"#
+        let (store, gateway, messages, codex) = try await setup([relay, worker, delivery], acknowledgementDelay: .seconds(1))
+        await codex.setOpening(["I'll open the page and read its heading."])
+        await gateway.start(); await gateway.receive(inbound("quick"))
+        try await eventually { try await store.queueState("inbound:quick") == "completed" }
+        try await Task.sleep(for: .milliseconds(1050))
+        await codex.emitProgress("I found the page heading.")
+        await codex.emitProgress("Final content must not become progress.", phase: .finalAnswer)
+        let sent = await messages.sent
+        XCTAssertEqual(sent, ["The heading is Example Domain."])
+    }
+
+    func testCancelledOpeningAndPrivateProgressAreNotSent() async throws {
+        let (_, gateway, messages, codex) = try await setup([relay, worker], acknowledgementDelay: .seconds(1))
+        await codex.setOpening(["TOKEN: sk-abcdefghijklmnopqrstuvwxyz", "I'll check dinner options for Friday."])
+        await codex.hold(); await gateway.start(); await gateway.receive(inbound())
+        try await eventually { await codex.turns == 2 }
+        await gateway.stop()
+        await codex.emitProgress("I found two restaurants.")
+        let sent = await messages.sent
+        XCTAssertTrue(sent.isEmpty)
+    }
+
+    func testOpeningIsSuppressedWhileApprovalNeedsAttention() async throws {
+        let (_, gateway, messages, codex) = try await setup([relay, worker], acknowledgementDelay: .milliseconds(25))
+        let opening = "I'll open the document and check its contents."
+        await codex.setOpening([opening]); await codex.askNativeApproval()
+        await gateway.start(); await gateway.receive(inbound())
+        try await eventually { await gateway.pendingApproval() != nil }
+        try await Task.sleep(for: .milliseconds(60))
+        let sent = await messages.sent
+        XCTAssertFalse(sent.contains(opening))
+        await gateway.stop()
+    }
+
+    func testUpgradeDiscardsQueuedLegacyAcknowledgement() async throws {
+        let (store, gateway, messages, codex) = try await setup([relay, worker])
+        let message = inbound("legacy-ack")
+        _ = try await store.acceptInbound(message)
+        let part = SteveStore.OutboundPart(id: "ack:" + message.guid, chatGuid: message.chatGuid, recipient: message.senderHandle, replyTo: message.guid, inboxGUIDs: [], text: "I’m on it.", attachmentPath: nil, workspace: nil, permission: nil)
+        try await store.stageDelivery([part], inboxGUIDs: [])
+        await codex.hold(); await gateway.start()
+        try await eventually { try await store.queueState(part.id) == "failed" }
+        try await eventually { await codex.turns == 2 }
+        let sent = await messages.sent, state = try await store.queueState("inbound:" + message.guid)
+        XCTAssertTrue(sent.isEmpty)
         XCTAssertEqual(state, "running")
         await gateway.stop()
     }
