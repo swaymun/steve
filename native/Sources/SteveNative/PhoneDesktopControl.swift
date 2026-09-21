@@ -15,7 +15,7 @@ final class NativePhoneDesktopControl: NSObject, PhoneDesktopControl {
     private var display: SCDisplay?
     private var frameID: String?
     private var capturedBounds: CGRect?
-    private var indicator: NSPanel?
+    private var sharingStatusItem: NSStatusItem?
     private var observers: [NSObjectProtocol] = []
     private var sessionState = CaptureSessionState()
 
@@ -64,7 +64,7 @@ final class NativePhoneDesktopControl: NSObject, PhoneDesktopControl {
         frameID = nil
         capturedBounds = nil
         chrome.activate()
-        showIndicator(on: screen)
+        showSharingStatusItem()
     }
 
     func frame() async throws -> PhoneTakeoverFrame {
@@ -130,8 +130,7 @@ final class NativePhoneDesktopControl: NSObject, PhoneDesktopControl {
         display = nil
         frameID = nil
         capturedBounds = nil
-        indicator?.close()
-        indicator = nil
+        hideSharingStatusItem()
     }
 
     private func requireUserSession() throws {
@@ -159,28 +158,21 @@ final class NativePhoneDesktopControl: NSObject, PhoneDesktopControl {
         }
     }
 
-    private func showIndicator(on display: SCDisplay) {
-        indicator?.close()
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 390, height: 56), styleMask: [.titled, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.title = "Steve screen sharing"
-        panel.level = .floating
-        panel.hidesOnDeactivate = false
-        panel.isReleasedWhenClosed = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        let label = NSTextField(labelWithString: "Your phone can see and control this display.")
-        label.font = .systemFont(ofSize: 12)
-        let button = NSButton(title: "Stop sharing", target: self, action: #selector(stopRequested))
-        let stack = NSStackView(views: [label, button])
-        stack.spacing = 12
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        panel.contentView?.addSubview(stack)
-        if let content = panel.contentView {
-            NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12), stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12), stack.centerYAnchor.constraint(equalTo: content.centerYAnchor)])
-        }
-        let screen = NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == display.displayID }
-        if let visible = screen?.visibleFrame { panel.setFrameTopLeftPoint(NSPoint(x: visible.midX - 195, y: visible.maxY - 8)) }
-        panel.orderFrontRegardless()
-        indicator = panel
+    private func showSharingStatusItem() {
+        hideSharingStatusItem()
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.image = NSImage(systemSymbolName: "display", accessibilityDescription: "Steve phone sharing")
+        item.button?.title = " Sharing"
+        item.button?.toolTip = "Steve is sharing this display with your phone. Click to stop sharing and keep Steve paused."
+        item.button?.setAccessibilityLabel("Steve phone sharing. Stop sharing.")
+        item.button?.target = self
+        item.button?.action = #selector(stopRequested)
+        sharingStatusItem = item
+    }
+
+    private func hideSharingStatusItem() {
+        if let sharingStatusItem { NSStatusBar.system.removeStatusItem(sharingStatusItem) }
+        sharingStatusItem = nil
     }
 
     @objc private func stopRequested() { onStopRequested?() }
