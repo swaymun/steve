@@ -28,6 +28,8 @@ See [setup compatibility](setup.md#2-messages-access-and-pairing): v0.1.6 uses t
 
 The v0.1.7 runtime checks also verified that internal conversations stay in Steve's private runtime, without adding tasks to the desktop Codex history. An earlier v0.1.7 candidate exercised existing conversation import, browser work, restart, and a calendar read before the final fresh-state checks. Keep migration evidence separate from a fresh installation.
 
+v0.1.8 adds agent-authored delayed task openings and natural task identification in final replies. Its fixtures, full test suite, optimized build, and release artifact were validated without reinstalling Steve; both cleaned Macs deliberately remained uninstalled, so these message-flow changes do not have new live messaging or device acceptance.
+
 ### Runtime scenarios
 
 | Scenario | Action | Required evidence |

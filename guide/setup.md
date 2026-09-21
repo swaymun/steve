@@ -1,12 +1,12 @@
 # Set up Steve on a Mac
 
-The default path is **install and launch → pair iMessage → enable native Computer Use → verify a browser task**. A local agent can perform the installation and open permission settings. You complete login, grant macOS access, and send the pairing code.
+The default path is **install and launch → pair iMessage → enable native Computer Use → verify a browser task**. A local agent can perform the installation and open permission settings. You complete login, grant macOS access, choose the owner, and send the first ordinary iMessage.
 
 Use the tested account arrangement: Messages on Steve's Mac is signed in to a separate account from the person texting Steve. Same-account self-messaging is outside this setup flow; messages marked as sent by the Mac's own account are ignored. Keep the Mac awake and Steve running in its signed-in user session.
 
 ## Install a release
 
-The [v0.1.7 development preview](https://github.com/swaymun/steve/releases/tag/v0.1.7) contains a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Native Computer Use has separate availability and macOS requirements; inspect its installed app and supported Codex setup flow. Intel builds have not been validated.
+The [v0.1.8 development preview](https://github.com/swaymun/steve/releases/tag/v0.1.8) contains a Developer ID-signed, Apple-notarized app for **Apple silicon (arm64), macOS 14 or later**. Native Computer Use has separate availability and macOS requirements; inspect its installed app and supported Codex setup flow. Intel builds have not been validated.
 
 ### Discover the right download
 
@@ -14,7 +14,7 @@ Steve is currently distributed as a GitHub prerelease. Use the [published releas
 
 An agent should inspect published, non-draft releases in descending version order and choose the newest compatible one. Check the Mac's architecture and macOS version against the release notes, and require both `Steve-macOS.zip` and `Steve-macOS.zip.sha256` in that same release. GitHub's automatic source ZIP/tar archives are not the app. If no compatible app exists, explain the source-build option rather than claiming there is no release.
 
-For this version: [download the app ZIP](https://github.com/swaymun/steve/releases/download/v0.1.7/Steve-macOS.zip) and [its checksum](https://github.com/swaymun/steve/releases/download/v0.1.7/Steve-macOS.zip.sha256). In the download folder:
+For this version: [download the app ZIP](https://github.com/swaymun/steve/releases/download/v0.1.8/Steve-macOS.zip) and [its checksum](https://github.com/swaymun/steve/releases/download/v0.1.8/Steve-macOS.zip.sha256). In the download folder:
 
 ```sh
 shasum -a 256 -c Steve-macOS.zip.sha256
