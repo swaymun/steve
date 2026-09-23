@@ -1750,13 +1750,13 @@ extension CodexAppServerClient {
 
     func relayProfile(settings: Settings) async throws -> AgentModelProfile {
         let catalog = try await listModels()
-        let requested = settings.relayModel ?? "gpt-5.6-luna"
+        let requested = settings.relayModel ?? Settings.preferredCoordinatorModel
         if let model = catalog.first(where: { $0.id == requested || $0.model == requested }),
            model.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == settings.relayEffort }) {
             return .init(model: model.id, effort: settings.relayEffort, serviceTier: settings.relayServiceTier)
         }
         guard settings.relayModel == nil else { throw RPCError(message: "The selected coordinator model or reasoning effort is unavailable in Codex.") }
-        return .init(model: settings.model, effort: settings.effort, serviceTier: settings.relayServiceTier)
+        return .init(model: settings.model, effort: settings.effort, serviceTier: settings.serviceTier)
     }
 
     func operatorThread(threadID: String?, cwd: String, permissionProfile: String, profile: AgentModelProfile, instructions: String, mode: OperatorMode, maxHelpers: Int) async throws -> String {

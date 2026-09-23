@@ -2,6 +2,22 @@ import XCTest
 @testable import SteveNative
 
 final class ServiceTierTests: XCTestCase {
+    func testFreshInstallModelDefaultsDoNotChangeLegacySettings() throws {
+        let fresh = defaultSettings()
+        XCTAssertEqual(fresh.model, "gpt-6-sol")
+        XCTAssertEqual(fresh.effort, "xhigh")
+        XCTAssertEqual(fresh.serviceTier, .standard)
+        XCTAssertNil(fresh.relayModel)
+        XCTAssertEqual(Settings.preferredCoordinatorModel, "gpt-6-luna")
+        XCTAssertEqual(fresh.relayEffort, "low")
+        XCTAssertEqual(fresh.relayServiceTier, .fast)
+
+        let legacy = Data(#"{"displayName":"Fixture","model":"gpt-5.6-luna","effort":"high","relayServiceTier":"standard"}"#.utf8)
+        let saved = try JSONDecoder().decode(Settings.self, from: legacy)
+        XCTAssertEqual(saved.model, "gpt-5.6-luna")
+        XCTAssertEqual(saved.effort, "high")
+        XCTAssertEqual(saved.relayServiceTier, .standard)
+    }
     func testChangedAccessColdResumesSameThreadAndUnchangedAccessDoesNotUnload() async throws {
         let script = #"""
         loaded=0

@@ -238,6 +238,7 @@ final class GatewayLifecycleTests: XCTestCase {
         let plan = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Done"],"attachments":[]}"#
         let (store, gateway, _, codex) = try await setup([relay, worker, plan, relay, worker, plan])
         var settings = try await store.getSettings()!
+        settings.relayModel = "fixture"
         settings.serviceTier = .fast
         try await store.saveSettings(settings)
         await gateway.start(); await gateway.receive(inbound("fast-tier"))

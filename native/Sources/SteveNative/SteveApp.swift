@@ -27,6 +27,7 @@ enum SteveLog {
 enum SteveBrowser { static func open(_ url: URL) { let opened = NSWorkspace.shared.open(url); SteveLog.write("Browser handoff opened=\(opened) scheme=\(url.scheme ?? "unknown")") } }
 
 struct Settings: Codable, Sendable {
+    static let preferredCoordinatorModel = "gpt-6-luna"
     var displayName: String
     var model: String
     var effort: String
@@ -371,10 +372,10 @@ struct StevePopover: View {
                 disclosure("Permissions", value: model.snapshot?.settings.permissionProfile.map(humanizeLabel) ?? "Select a profile", expanded: $permissionsExpanded) { ForEach(model.snapshot?.permissions ?? []) { profile in action(humanizeLabel(profile.name ?? profile.id), subtitle: profile.id.trimmingCharacters(in: CharacterSet(charactersIn: ":")) == "danger-full-access" ? permissionDescription(profile.id) : (profile.description ?? permissionDescription(profile.id)), disabled: !profile.allowed) { model.selectPermission(profile.id) } } }
                 Text("Coordinator").font(.caption).foregroundStyle(.secondary).padding(.top, 7).padding(.horizontal, 7)
                 let relaySetting = model.snapshot?.settings.relayModel
-                let relayEffectiveModel = relaySetting ?? (model.snapshot?.models.contains(where: { $0.id == "gpt-5.6-luna" }) == true ? "gpt-5.6-luna" : model.snapshot?.settings.model)
+                let relayEffectiveModel = relaySetting ?? (model.snapshot?.models.contains(where: { $0.id == Settings.preferredCoordinatorModel }) == true ? Settings.preferredCoordinatorModel : model.snapshot?.settings.model)
                 let relaySelected = model.snapshot?.models.first(where: { $0.id == relayEffectiveModel })
                 disclosure("Coordinator Model", value: relaySetting.map(humanizeModelLabel) ?? "Auto", expanded: $relayModelsExpanded) {
-                    action("Auto", subtitle: "Luna Low Standard when available; otherwise the worker profile.") { model.selectRelayModel("auto") }
+                    action("Auto", subtitle: "Prefers GPT-6 Luna; uses the reasoning and speed shown below.") { model.selectRelayModel("auto") }
                     ForEach(model.snapshot?.models ?? []) { entry in action(humanizeModelLabel(entry.displayName ?? entry.id), subtitle: entry.description ?? modelDescription(entry.id)) { model.selectRelayModel(entry.id) } }
                 }
                 disclosure("Coordinator Reasoning", value: humanizeLabel(model.snapshot?.settings.relayEffort ?? "low"), expanded: $relayEffortsExpanded) { ForEach(relaySelected?.supportedReasoningEfforts ?? [], id: \.reasoningEffort) { effort in action(humanizeLabel(effort.reasoningEffort), subtitle: effort.description ?? reasoningDescription(effort.reasoningEffort)) { model.selectRelayEffort(effort.reasoningEffort) } } }

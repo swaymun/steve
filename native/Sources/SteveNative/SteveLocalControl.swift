@@ -95,9 +95,9 @@ enum SteveControl {
                 }
                 let requestedRelay = request.options["relay-model"]
                 let relaySelected = requestedRelay == "auto" ? nil : (requestedRelay ?? snapshot.settings.relayModel)
-                let relayEffective = relaySelected ?? (snapshot.models.contains(where: { $0.id == "gpt-5.6-luna" }) ? "gpt-5.6-luna" : selected)
+                let relayEffective = relaySelected ?? (snapshot.models.contains(where: { $0.id == Settings.preferredCoordinatorModel }) ? Settings.preferredCoordinatorModel : selected)
                 if request.options["relay-model"] != nil || request.options["relay-effort"] != nil {
-                    let usesWorkerFallback = relaySelected == nil && relayEffective == selected && !snapshot.models.contains(where: { $0.id == "gpt-5.6-luna" })
+                    let usesWorkerFallback = relaySelected == nil && relayEffective == selected && !snapshot.models.contains(where: { $0.id == Settings.preferredCoordinatorModel })
                     let effort = usesWorkerFallback ? (request.options["effort"] ?? snapshot.settings.effort) : (request.options["relay-effort"] ?? snapshot.settings.relayEffort)
                     guard snapshot.models.contains(where: { $0.id == relayEffective && $0.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == effort }) }) else {
                         throw RPCError(message: "Coordinator reasoning effort is not supported by the selected coordinator model.")

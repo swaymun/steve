@@ -71,7 +71,7 @@ extension GatewayCodexClient {
     }
     func stopDescendants(threadID: String) async throws {}
     func quiesceThread(threadID: String) async throws {}
-    func relayProfile(settings: Settings) async throws -> AgentModelProfile { .init(model: settings.relayModel ?? settings.model, effort: settings.relayModel == nil ? settings.effort : settings.relayEffort, serviceTier: settings.relayServiceTier) }
+    func relayProfile(settings: Settings) async throws -> AgentModelProfile { .init(model: settings.relayModel ?? settings.model, effort: settings.relayModel == nil ? settings.effort : settings.relayEffort, serviceTier: settings.relayModel == nil ? settings.serviceTier : settings.relayServiceTier) }
 }
 extension CodexAppServerClient: GatewayCodexClient {}
 
@@ -1470,7 +1470,7 @@ actor SteveRuntime {
         if profileChanged {
             try validate(next.model, effort: next.effort)
             if let relay = next.relayModel { try validate(relay, effort: next.relayEffort) }
-            else if catalog.contains(where: { $0.id == "gpt-5.6-luna" || $0.model == "gpt-5.6-luna" }) { try validate("gpt-5.6-luna", effort: next.relayEffort) }
+            else if catalog.contains(where: { $0.id == Settings.preferredCoordinatorModel || $0.model == Settings.preferredCoordinatorModel }) { try validate(Settings.preferredCoordinatorModel, effort: next.relayEffort) }
         }
         for (key, relay) in [("service-tier", false), ("relay-service-tier", true)] {
             if let value = options[key] {
@@ -1557,8 +1557,8 @@ func normalizeHandle(_ value: String) -> String {
     return trimmed.filter { $0.isNumber || $0 == "+" }
 }
 
-private func defaultSettings() -> Settings {
-    Settings(displayName: "Steve", model: "gpt-5.6-sol", effort: "low", workspaceRoot: StevePaths.workspaceDirectory.path)
+func defaultSettings() -> Settings {
+    Settings(displayName: "Steve", model: "gpt-6-sol", effort: "xhigh", workspaceRoot: StevePaths.workspaceDirectory.path, relayServiceTier: .fast)
 }
 
 private func awaitBlocking<T>(_ operation: @escaping () async throws -> T) throws -> T {

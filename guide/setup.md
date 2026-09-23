@@ -78,7 +78,7 @@ The profiles are Read Only (`read-only`), Workspace Write (`workspace-write`), a
 
 Reuse the existing Codex sign-in. Only if sign-in is missing, run `steve setup --login --non-interactive --json` and let the user finish the official browser flow. Keep returned login URLs private. Login pauses Steve; after authentication, run doctor, then `steve start --json` when ready to resume. Never ask the user to paste ChatGPT tokens or passwords.
 
-Then offer recommended models or customization. For a new installation, recommend a **Luna Low Standard coordinator, Luna Xhigh Fast workers, two concurrent workers, and one research helper per eligible worker**. Fast consumes more allowance. Apply this recommendation only if accepted and supported by the returned `models` catalog; do not overwrite an existing profile by default. For customization, ask about the worker model first, then reasoning/speed, coordinator, and concurrency as needed. A user who accepts the recommendation does not need a separate question for every setting. See [model and concurrency settings](#coordinator-and-worker-settings).
+Then offer recommended models or customization. For a new installation, recommend a **GPT-6 Luna Low Fast coordinator, GPT-6 Sol Xhigh Standard workers, two concurrent workers, and one research helper per eligible worker**. Fast consumes more allowance. Apply this recommendation only if accepted and supported by the returned `models` catalog; do not overwrite an existing profile by default. For customization, ask about the worker model first, then reasoning/speed, coordinator, and concurrency as needed. A user who accepts the recommendation does not need a separate question for every setting. See [model and concurrency settings](#coordinator-and-worker-settings).
 
 ### 2. Messages access and pairing
 
@@ -167,19 +167,19 @@ Use normal messages for tasks and “yes”/“no” for a pending decision. Int
 
 ## Coordinator and worker settings
 
-The coordinator keeps the iMessage conversation and routes work. Its default is **Luna, Low, Standard** when that model is available in the signed-in Codex account. Workers do the work using their separate model, reasoning, and service-tier settings. If the automatic coordinator model is unavailable, Steve uses the selected worker model and effort; an explicitly selected unavailable coordinator model fails clearly.
+The coordinator keeps the iMessage conversation and routes work. On a fresh installation its default is **GPT-6 Luna, Low, Fast** when that model is available in the signed-in Codex account. Workers default to **GPT-6 Sol, Xhigh, Standard**. If the automatic coordinator model is unavailable, Steve uses the selected worker profile; an explicitly selected unavailable coordinator model fails clearly. Existing installations keep their saved choices.
 
 Change these independently in Steve's menu-bar settings or through the installed CLI:
 
 ```sh
-steve setup --coordinator-model gpt-5.6-luna --coordinator-effort low --coordinator-service-tier standard --json
-steve setup --worker-model gpt-5.6-luna --worker-effort xhigh --worker-service-tier fast --json
+steve setup --coordinator-model gpt-6-luna --coordinator-effort low --coordinator-service-tier fast --json
+steve setup --worker-model gpt-6-sol --worker-effort xhigh --worker-service-tier standard --json
 steve setup --max-workers 2 --max-helpers 1 --json
 ```
 
 The v1.0 CLI prefers `--worker-model`, `--worker-effort`, `--worker-service-tier`, `--coordinator-model`, `--coordinator-effort`, `--coordinator-service-tier`, and `--max-workers`. Legacy `--model`, `--effort`, `--service-tier`, `--relay-*`, and `--max-operators` still work; specify a choice only once. Existing settings and storage keys are preserved.
 
-Use `--coordinator-model auto` to restore automatic selection. The model and effort must be supported by the current account. Standard is the default service tier; Fast consumes more Codex usage. Changing agent settings applies to future turns and preserves pairing, permissions, schedules, and work already running.
+Use `--coordinator-model auto` to restore automatic selection. The model and effort must be supported by the current account. Standard is the worker's default service tier and Fast is the coordinator's fresh-install default; Fast consumes more Codex usage. Changing agent settings applies to future turns and preserves pairing, permissions, schedules, and work already running.
 
 Steve defaults to two active workers (configurable from one to four) and one native research helper per background worker (zero to two). Helpers have one level of delegation and only public web research tools. When the installed App Server cannot support helper lineage, the worker works alone. Computer tasks run one at a time; other research can continue. Helpers are disabled while a worker owns the Mac.
 
