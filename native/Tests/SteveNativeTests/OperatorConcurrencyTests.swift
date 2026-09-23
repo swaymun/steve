@@ -21,11 +21,14 @@ private actor ConcurrentCodex: GatewayCodexClient {
     var quiesced: [String] = []
     var stops = 0
     var deliveries = 0
+    var deliveryInputs: [String] = []
+    var workerResults: [String: String] = [:]
     var steerAttempts = 0
     var rejectSteer = false
     func enqueue(_ request: RelayRequestEnvelope) throws { routes.append(String(decoding: try JSONEncoder().encode(request), as: UTF8.self)) }
     func failSteering() { rejectSteer = true }
     func complete(_ thread: String) { completed.insert(thread) }
+    func result(_ json: String, for thread: String) { workerResults[thread] = json }
     func setApprovalHandler(_ handler: CodexApprovalHandler?) {}
     private var holdingStop = false
     private var stopWaiter: CheckedContinuation<Void, Never>?
@@ -52,7 +55,7 @@ private actor ConcurrentCodex: GatewayCodexClient {
         if threadID == "relay" {
             await onTurnStarted(UUID().uuidString)
             if text.hasPrefix("WORKER_RESULT_JSON:") {
-                deliveries += 1
+                deliveries += 1; deliveryInputs.append(text)
                 return .init(text: #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Verified fixture result"],"attachments":[]}"#, attachmentPaths: [])
             }
             guard !routes.isEmpty else { throw RPCError(message: "Unexpected relay routing turn") }
@@ -68,8 +71,13 @@ private actor ConcurrentCodex: GatewayCodexClient {
             if interrupted.contains(threadID) { throw CodexTurnInterrupted() }
             try await Task.sleep(for: .milliseconds(5))
         }
-        return .init(text: #"{"schemaVersion":1,"kind":"worker_result","status":"completed","summary":"Verified fixture result","artifacts":[]}"#, attachmentPaths: [])
+        return .init(text: workerResults.removeValue(forKey: threadID) ?? #"{"schemaVersion":1,"kind":"worker_result","status":"completed","summary":"Verified fixture result","artifacts":[]}"#, attachmentPaths: [])
     }
+}
+
+private actor PhoneProbe {
+    var calls = 0
+    func issue() -> URL { calls += 1; return URL(string: "https://private.example.test/control")! }
 }
 
 final class OperatorConcurrencyTests: XCTestCase {
@@ -118,18 +126,43 @@ final class OperatorConcurrencyTests: XCTestCase {
         let remaining = await codex.active, stops = await codex.stops
         XCTAssertTrue(remaining.isEmpty); XCTAssertGreaterThan(stops, 0)
     }
-    func testComputerOperatorsWaitForExclusiveOwner() async throws {
+    func testTwoComputerOperatorsRunConcurrentlyWithinWorkerLimit() async throws {
         let (store, gateway, _, codex) = try await fixture(); await gateway.start()
         try await launch("first", mode: .computer, gateway: gateway, codex: codex)
         try await eventually { await codex.active.count == 1 }
         try await launch("second", mode: .computer, gateway: gateway, codex: codex)
-        try await eventually { try await store.operatorTasks().contains { $0.title == "second" && $0.state == .queued } }
-        let first = await codex.started
-        XCTAssertEqual(first.count, 1)
-        await codex.complete(first[0])
-        try await eventually { await codex.started.count == 2 }
+        try await eventually { await codex.active.count == 2 }
+        let tasks = try await store.operatorTasks()
+        XCTAssertEqual(tasks.filter { $0.mode == .computer && $0.state == .running }.count, 2)
+        try await launch("third", mode: .computer, gateway: gateway, codex: codex)
+        try await eventually { try await store.operatorTasks().contains { $0.title == "third" && $0.state == .queued } }
+        let starts = await codex.started
+        XCTAssertEqual(starts.count, 2)
+        await codex.complete(starts[0])
+        try await eventually { await codex.started.count == 3 }
         let active = await codex.active
+        XCTAssertEqual(active.count, 2)
+    }
+    func testOverlappingComputerWorkDoesNotOfferAnUnverifiedSignInPage() async throws {
+        let (store, gateway, _, codex) = try await fixture()
+        let phone = PhoneProbe()
+        await gateway.setPhoneAccessHandler { await phone.issue() }
+        await gateway.start()
+        try await launch("sign-in", mode: .computer, gateway: gateway, codex: codex)
+        try await launch("other-page", mode: .computer, gateway: gateway, codex: codex)
+        try await eventually { await codex.active.count == 2 }
+        let tasks = try await store.operatorTasks()
+        let first = try XCTUnwrap(tasks.first { $0.title == "sign-in" }?.threadID)
+        await codex.result(#"{"schemaVersion":1,"kind":"worker_result","status":"blocked","summary":"Sign in to continue.","blocker":{"reason":"sign_in","userAction":"Sign in on the open page.","verification":"Check the account after sign-in.","pageVerified":true}}"#, for: first)
+        await codex.complete(first)
+        try await eventually { try await store.operatorTasks().contains { $0.title == "sign-in" && $0.state == .blocked } }
+        let inputs = await codex.deliveryInputs
+        XCTAssertTrue(inputs.contains { $0.contains("SIGN_IN_HANDOFF: The shared browser may have changed") })
+        let calls = await phone.calls, active = await codex.active
+        XCTAssertEqual(calls, 0)
         XCTAssertEqual(active.count, 1)
+        try await launch("third-page", mode: .computer, gateway: gateway, codex: codex)
+        try await eventually { await codex.active.count == 2 }
     }
     func testTargetedCancellationKeepsUnrelatedOperatorRunning() async throws {
         let (store, gateway, _, codex) = try await fixture(); await gateway.start()
@@ -225,7 +258,8 @@ final class OperatorConcurrencyTests: XCTestCase {
         let (store, gateway, _, codex) = try await fixture()
         await gateway.start()
         try await launch("computer-owner", mode: .computer, gateway: gateway, codex: codex)
-        try await eventually { await codex.active.count == 1 }
+        try await launch("slot-filler", mode: .background, gateway: gateway, codex: codex)
+        try await eventually { await codex.active.count == 2 }
         let settings = try await store.getSettings()!, epoch = try await store.gatewayEpoch()!
         let queued = OperatorTaskRecord(id: "queued-fresh", chatGuid: "chat", senderHandle: "fixture@example.test",
             workspace: settings.workspaceRoot!, permission: "workspace-write", title: "Queued fresh task", objective: "Start anew",
@@ -242,7 +276,11 @@ final class OperatorConcurrencyTests: XCTestCase {
         XCTAssertEqual(updated?.contextAction, .fresh, "A routine follow-up must not revive the old thread")
         XCTAssertEqual(updated?.threadID, queued.threadID)
         XCTAssertTrue(updated?.objective.contains("Also include this detail") == true)
-        XCTAssertEqual(starts.count, 1, "The existing computer owner must still block this task")
+        XCTAssertEqual(starts.count, 2, "The worker limit must keep this task queued")
+        await codex.complete(starts[0])
+        try await eventually { await codex.started.count == 3 }
+        let resumed = try await store.operatorTask(id: queued.id)
+        XCTAssertNotEqual(resumed?.threadID, queued.threadID, "A queued fresh task must not resume its old thread")
     }
 
     func testLegacyTaskOriginalWordsSurviveFreshFollowUp() async throws {

@@ -158,7 +158,7 @@ enum StevePrompt {
         }
         return common + """
 
-        COMPUTER OWNER: you alone control the visible Mac; helpers are disabled during control. Incorporate follow-ups while working. Use blocked for unavailable access, not needs_computer. For a requested screenshot, capture and inspect final relevant state with official Computer Use and emit that image last. Select path="steve-capture:last" in artifacts; runtime resolves only the final native image from this turn. No capture-folder scans, upload servers, shell screenshots or base64 in chat. Other artifacts use absolute workspace paths.
+        COMPUTER WORKER: other workers may use the same Mac concurrently. Keep your task in its own app window or browser tab where possible; re-observe the target before acting, especially after a focus or page change. Never assume another worker's visible state belongs to this task. Helpers are disabled during control. Incorporate follow-ups while working. Use blocked for unavailable access, not needs_computer. For a requested screenshot, capture and inspect final relevant state with official Computer Use and emit that image last. Select path="steve-capture:last" in artifacts; runtime resolves only the final native image from this turn. No capture-folder scans, upload servers, shell screenshots or base64 in chat. Other artifacts use absolute workspace paths.
         """
     }
 

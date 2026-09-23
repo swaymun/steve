@@ -143,8 +143,13 @@ actor GatewayCoordinator {
     private var takeoverExpiryTask: Task<Void, Never>?
     private var activeWorkers: [String: WorkerBinding] = [:]
     private var operatorRuns: [String: Task<Void, Never>] = [:]
-    private var computerOwner: String?
+    // Computer Use belongs to each worker thread. Keep track of live users for
+    // approval and sign-in safety, but do not reserve the Mac for a whole task.
+    private var computerWorkers = Set<String>()
+    private var overlappingComputerWorkers = Set<String>()
+    private var unverifiedComputerStops = Set<String>()
     private var loginReservation: (taskID: String, runID: String, expiresAt: Date)?
+    private var loginExpiryTask: Task<Void, Never>?
     private var steeringTasks: [String: Task<Void, Never>] = [:]
     private var approvals: [String: Approval] = [:]
     private var phoneApprovalOrder: [String] = []
@@ -191,7 +196,7 @@ actor GatewayCoordinator {
         connectionHandoffToken == nil && approvals.isEmpty && !pollingSchedules &&
         workTask == nil && senderTask == nil && inFlightTasks.isEmpty &&
         operatorRuns.isEmpty && steeringTasks.isEmpty && activeWorkers.isEmpty &&
-        computerOwner == nil && loginReservation == nil && privatePhoneDeliveries.isEmpty &&
+        computerWorkers.isEmpty && unverifiedComputerStops.isEmpty && loginReservation == nil && privatePhoneDeliveries.isEmpty &&
         !capturePermit.isActive
     }
     func authorizeVideo() async throws -> SteveVideoAuthorization {
@@ -217,6 +222,9 @@ actor GatewayCoordinator {
                 paused = try await store.paused()
                 try await store.saveGatewayEpoch(epoch)
                 initialized = true
+            }
+            if let expiry = try await store.operatorTasks().compactMap({ livePhoneHandoffExpiry($0) }).min() {
+                scheduleLoginExpiry(at: expiry, epoch: epoch)
             }
         } catch { transportError = error.localizedDescription; running = false; return }
         await codex.setApprovalHandler { [weak self] request in await self?.requestApproval(request) ?? .cancel }
@@ -338,8 +346,11 @@ actor GatewayCoordinator {
         operatorRuns.removeAll()
         for task in steeringTasks.values { task.cancel() }
         steeringTasks.removeAll()
-        computerOwner = nil
+        computerWorkers.removeAll()
+        overlappingComputerWorkers.removeAll()
+        unverifiedComputerStops.removeAll()
         loginReservation = nil
+        loginExpiryTask?.cancel(); loginExpiryTask = nil
         workTask?.cancel(); workTask = nil
         senderTask?.cancel(); senderTask = nil
         var persisted = true
@@ -702,7 +713,10 @@ actor GatewayCoordinator {
                 // Intake may have arrived while the final database read was suspended.
                 let pending = (try? await store.pendingInbox()) ?? []
                 let operatorLimit = (try? await store.getSettings())?.maxConcurrentOperators ?? 2
-                let hasResults = ((try? await store.operatorTasks()) ?? []).contains { $0.state == .awaitingDelivery || ($0.state == .queued && self.operatorRuns.count < operatorLimit && ($0.mode == .background || self.computerOwner == nil)) }
+                let tasks = (try? await store.operatorTasks()) ?? []
+                let computerReady = self.unverifiedComputerStops.isEmpty && !self.hasLivePhoneHandoff(tasks)
+                    && (self.loginReservation?.expiresAt ?? .distantPast) <= self.clockNow()
+                let hasResults = tasks.contains { $0.state == .awaitingDelivery || ($0.state == .queued && self.operatorRuns.count < operatorLimit && ($0.mode == .background || computerReady)) }
                 let hasInbox = !paused && (!pending.isEmpty || hasResults)
                 if completed && self.epoch == captured && hasInbox { scheduleWork() }
             }
@@ -1085,8 +1099,10 @@ actor GatewayCoordinator {
                       url.absoluteString.count <= 4096, clockNow() < expires else { throw RPCError(message: "Phone access unavailable") }
                 guard loginReservation?.taskID == task.id, loginReservation?.runID == task.runID,
                       (loginReservation?.expiresAt ?? .distantPast) > clockNow() else { throw CancellationError() }
-                loginReservation = (task.id, task.runID, clockNow().addingTimeInterval(120))
                 let issuedAt = clockNow()
+                let reservationExpiresAt = issuedAt.addingTimeInterval(120)
+                loginReservation = (task.id, task.runID, reservationExpiresAt)
+                scheduleLoginExpiry(at: reservationExpiresAt, epoch: epoch)
                 task.handoff?.linkIssuedAt = issuedAt
                 try await store.updateOperatorTask(id: task.id, expectedEpoch: epoch, expectedRunID: task.runID) { current in
                     guard current.state == .blocked, current.handoff?.completedAt == nil else { throw CancellationError() }
@@ -1097,6 +1113,10 @@ actor GatewayCoordinator {
             } else { throw RPCError(message: "Phone access unavailable") }
         } catch is CancellationError { return }
         catch {
+            if loginReservation?.taskID == taskID {
+                loginReservation = nil
+                loginExpiryTask?.cancel(); loginExpiryTask = nil
+            }
             // Do not expose callback errors, which can contain credentials or URLs.
             if self.epoch == epoch, let task = try? await store.operatorTask(id: taskID), task.state == .blocked,
                task.handoff?.completedAt == nil, let first = task.inbound.first {
@@ -1115,7 +1135,10 @@ actor GatewayCoordinator {
         let trusted = try await store.trustedConversation()
         guard task.workspace == settings?.workspaceRoot, task.permission == settings?.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")),
               task.chatGuid == trusted?.chatGuid, normalizeHandle(task.senderHandle) == normalizeHandle(trusted?.senderHandle ?? "") else { throw UserAutomationError.boundaryChanged }
-        if loginReservation?.taskID == taskID { loginReservation = nil }
+        if loginReservation?.taskID == taskID {
+            loginReservation = nil
+            loginExpiryTask?.cancel(); loginExpiryTask = nil
+        }
         task.handoff?.completedAt = clockNow()
         task.objective = "The human says sign-in is complete. Re-observe the same allowed page/account and verify before continuing this same goal. Do not assume login succeeded or repeat completed external effects. Verification: " + handoff.blocker.verification + "\nOriginal goal:\n" + task.objective
         if let inbound { task.inbound = [inbound]; task.originalMessages = Self.mergeOriginals(task.originalMessages ?? [], [inbound]) }
@@ -1130,7 +1153,7 @@ actor GatewayCoordinator {
         // demonstration frames while a human decision is outstanding.
         capturePermit.invalidate()
         guard running, request.method == "mcpServer/elicitation/request", request.mode == "url" || request.isEmptyBrowserOriginForm || request.nativeAppName != nil, let requestThread = request.threadID, let binding = activeWorkers[requestThread],
-              binding.epoch == epoch, computerOwner == binding.taskID, binding.threadID == request.threadID, binding.turnID == request.turnID,
+              binding.epoch == epoch, computerWorkers.contains(binding.taskID), binding.threadID == request.threadID, binding.turnID == request.turnID,
               binding.turnID != nil, !paused, !changingBoundary, request.expiresAt > Date() else { return .cancel }
         let originHost: String?
         let safeMessage: String
@@ -1159,7 +1182,7 @@ actor GatewayCoordinator {
             let settings = try? await store.getSettings()
             let trusted = try? await store.trustedConversation()
             guard running, !Task.isCancelled, !paused, !changingBoundary, epoch == binding.epoch,
-                  request.expiresAt > Date(), computerOwner == binding.taskID, activeWorkers[binding.threadID]?.turnID == binding.turnID,
+                  request.expiresAt > Date(), computerWorkers.contains(binding.taskID), activeWorkers[binding.threadID]?.turnID == binding.turnID,
                   trusted?.chatGuid == binding.message.chatGuid,
                   normalizeHandle(trusted?.senderHandle ?? "") == normalizeHandle(binding.message.senderHandle) else { return .cancel }
             if settings?.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")).lowercased() == "danger-full-access" {
@@ -1681,7 +1704,7 @@ extension GatewayCoordinator {
                 objective: prompt + additionalContext, mode: request.mode ?? .computer, state: .queued, inbound: inbound, runID: UUID().uuidString)
         }
         // An ordinary correction must not undo a fresh/compact action that is
-        // still queued behind another computer owner.
+        // still queued behind the worker limit or a sign-in handoff.
         let requestedContextAction = request.workerContextAction ?? .reuse
         task.contextAction = requestedContextAction == .reuse ? (queuedContextAction ?? .reuse) : requestedContextAction
         task.originalMessages = Self.mergeOriginals(task.originalMessages ?? task.inbound, inbound)
@@ -1695,20 +1718,41 @@ extension GatewayCoordinator {
         try await store.saveOperatorTask(task, expectedEpoch: epoch)
     }
 
+    private func livePhoneHandoffExpiry(_ task: OperatorTaskRecord) -> Date? {
+        guard task.mode == .computer, [.blocked, .awaitingDelivery].contains(task.state),
+              let handoff = task.handoff, handoff.blocker.reason == .signIn,
+              handoff.blocker.pageVerified == true, handoff.completedAt == nil,
+              let issuedAt = handoff.linkIssuedAt else { return nil }
+        let expiry = issuedAt.addingTimeInterval(120)
+        return expiry > clockNow() ? expiry : nil
+    }
+
+    private func hasLivePhoneHandoff(_ tasks: [OperatorTaskRecord]) -> Bool {
+        tasks.contains { livePhoneHandoffExpiry($0) != nil }
+    }
+
+    private func scheduleLoginExpiry(at expiresAt: Date, epoch: String) {
+        loginExpiryTask?.cancel()
+        loginExpiryTask = Task {
+            // Wake just after expiry so a scheduler tick cannot see the link as
+            // still live and leave queued computer work asleep indefinitely.
+            do { try await Task.sleep(for: .seconds(max(0, expiresAt.timeIntervalSince(clockNow())) + 1)) }
+            catch { return }
+            guard self.epoch == epoch, !Task.isCancelled else { return }
+            if let reservation = loginReservation, reservation.expiresAt <= clockNow() { loginReservation = nil }
+            scheduleWork()
+        }
+    }
+
     private func scheduleOperators(epoch: String) async throws {
         try check(epoch)
         let settings = try await store.getSettings() ?? defaultSettings()
         let tasks = try await store.operatorTasks()
-        let loginReserved = tasks.contains { task in
-            guard task.mode == .computer, [.blocked, .awaitingDelivery].contains(task.state),
-                  let handoff = task.handoff, handoff.blocker.reason == .signIn,
-                  handoff.blocker.pageVerified == true, handoff.completedAt == nil else { return false }
-            return (handoff.linkIssuedAt ?? handoff.createdAt).addingTimeInterval(120) > clockNow()
-        }
+        let loginReserved = hasLivePhoneHandoff(tasks)
         for var task in tasks where task.state == .queued {
             guard operatorRuns.count < settings.maxConcurrentOperators else { break }
             guard operatorRuns[task.id] == nil else { continue }
-            if task.mode == .computer && (computerOwner != nil || loginReserved || (loginReservation?.expiresAt ?? .distantPast) > clockNow()) { continue }
+            if task.mode == .computer && (!unverifiedComputerStops.isEmpty || loginReserved || (loginReservation?.expiresAt ?? .distantPast) > clockNow()) { continue }
             let trusted = try await store.trustedConversation()
             guard task.chatGuid == trusted?.chatGuid, normalizeHandle(task.senderHandle) == normalizeHandle(trusted?.senderHandle ?? ""),
                   task.workspace == settings.workspaceRoot, task.permission == settings.permissionProfile?.trimmingCharacters(in: CharacterSet(charactersIn: ":")) else {
@@ -1718,7 +1762,13 @@ extension GatewayCoordinator {
             task.state = .running
             try await store.saveOperatorTask(task, expectedEpoch: epoch, expectedRunID: task.runID)
             try check(epoch)
-            if task.mode == .computer { computerOwner = task.id }
+            if task.mode == .computer {
+                if !computerWorkers.isEmpty {
+                    overlappingComputerWorkers.formUnion(computerWorkers)
+                    overlappingComputerWorkers.insert(task.id)
+                }
+                computerWorkers.insert(task.id)
+            }
             let launched = task
             let runningID = UUID()
             operatorRuns[task.id] = Task {
@@ -1737,7 +1787,11 @@ extension GatewayCoordinator {
         defer {
             if let threadID { activeWorkers.removeValue(forKey: threadID) }
             operatorRuns.removeValue(forKey: launched.id)
-            if quiescent, computerOwner == launched.id { computerOwner = nil }
+            if launched.mode == .computer {
+                computerWorkers.remove(launched.id)
+                overlappingComputerWorkers.remove(launched.id)
+                if !quiescent { unverifiedComputerStops.insert(launched.id) }
+            }
             steeringTasks.removeValue(forKey: launched.id)
             if self.epoch == epoch { scheduleWork() }
         }
@@ -1817,8 +1871,12 @@ extension GatewayCoordinator {
             }
             let finalEnvelope = envelope
             let accepted = WorkerResultEnvelope(schemaVersion: finalEnvelope.schemaVersion, kind: finalEnvelope.kind, status: finalEnvelope.status, summary: finalEnvelope.summary, userQuestion: finalEnvelope.userQuestion, artifacts: verified, blocker: finalEnvelope.blocker, plan: finalEnvelope.plan, notifyUser: finalEnvelope.notifyUser)
-            if launched.mode == .computer, finalEnvelope.blocker?.reason == .signIn, finalEnvelope.blocker?.pageVerified == true {
-                loginReservation = (launched.id, launched.runID, clockNow().addingTimeInterval(120))
+            if launched.mode == .computer, !overlappingComputerWorkers.contains(launched.id),
+               finalEnvelope.blocker?.reason == .signIn, finalEnvelope.blocker?.pageVerified == true,
+               (loginReservation == nil || (loginReservation?.expiresAt ?? .distantPast) <= clockNow()) {
+                // Reserve the shared page until other active computer workers
+                // finish. The two-minute link clock starts only when issued.
+                loginReservation = (launched.id, launched.runID, .distantFuture)
             }
             try await store.updateOperatorTask(id: launched.id, expectedEpoch: epoch, expectedRunID: launched.runID) { task in
                 guard task.state == .running else { throw CancellationError() }
@@ -1993,6 +2051,9 @@ extension GatewayCoordinator {
             let artifactSummary = envelope.artifacts.map { ["id": $0.id, "caption": $0.caption ?? "", "mimeType": $0.mimeType ?? ""] }
             let input = "WORKER_RESULT_JSON:\n\(try encodeJSON(envelope))\n\nTASK_TITLE: \(task.title)\nTASK_ID: \(task.id)\n\nVERIFIED_ARTIFACTS_JSON:\n\(try encodeJSON(artifactSummary))\n\nRECOVERY_ATTEMPTED: true. Deliver this task's verified result; never repeat its execution."
                 + (followUpStatus.map { "\n\nFOLLOW_UP_STATUS (authoritative runtime state, overrides scheduling claims in the summary):\n" + $0 } ?? "")
+                + (envelope.blocker?.reason == .signIn && loginReservation?.taskID != task.id
+                   ? "\n\nSIGN_IN_HANDOFF: The shared browser may have changed during concurrent work. No phone link will be issued for this result. Ask the user to have Steve reopen the sign-in page after the other task finishes."
+                   : "")
             let result = try await codex.runTurn(threadID: relay, text: input, attachmentPaths: [], workspace: task.workspace, model: profile.model, effort: profile.effort, serviceTier: profile.serviceTier, onTurnStarted: { _ in })
             let plan = try AgentEnvelopeParser.deliveryPlan(from: result.text)
             guard plan.recovery == nil else { throw AgentEnvelopeError.invalidPayload("Completed work cannot be replayed") }
@@ -2021,13 +2082,18 @@ extension GatewayCoordinator {
                 }
             }
             if envelope.blocker?.reason == .signIn, envelope.blocker?.pageVerified == true,
-               task.scheduledRunID == nil, (task.pendingFollowUps ?? []).isEmpty {
+               task.scheduledRunID == nil, (task.pendingFollowUps ?? []).isEmpty,
+               loginReservation?.taskID == task.id, loginReservation?.runID == task.runID {
                 await offerPhoneHandoff(taskID: task.id, epoch: epoch)
             }
             if let run = task.scheduledRunID { try await automation?.recordExecutionOutcome(id: run, outcome: envelope.status == .completed ? .succeeded : .failed) }
             try await store.finishAgentSession(chatGuid: task.chatGuid, messageGuid: first.guid, state: "idle", expectedEpoch: epoch)
         } catch {
             guard self.epoch == epoch, !Task.isCancelled else { return }
+            if loginReservation?.taskID == task.id {
+                loginReservation = nil
+                loginExpiryTask?.cancel(); loginExpiryTask = nil
+            }
             var failed = task; failed.state = .uncertain
             try? await store.saveOperatorTask(failed, expectedEpoch: epoch, expectedRunID: task.runID)
             try? await store.finishInbox(task.inbound.map(\.guid), state: "uncertain")
@@ -2064,14 +2130,17 @@ extension GatewayCoordinator {
         let originalRun = task.runID
         task.runID = UUID().uuidString
         try await store.saveOperatorTask(task, expectedEpoch: epoch, expectedRunID: originalRun)
-        if loginReservation?.taskID == id { loginReservation = nil }
+        if loginReservation?.taskID == id {
+            loginReservation = nil
+            loginExpiryTask?.cancel(); loginExpiryTask = nil
+        }
         let run = operatorRuns[id]
         if let thread = task.threadID {
             for id in approvals.keys.filter({ approvals[$0]?.binding.threadID == thread }) { finishApproval(id: id, decision: .cancel) }
         }
         run?.cancel()
         await run?.value
-        if computerOwner == id { throw RPCError(message: "The task's stop could not be verified. Pause and resume Steve before more computer work.") }
+        if unverifiedComputerStops.contains(id) { throw RPCError(message: "The task's stop could not be verified. Pause and resume Steve before more computer work.") }
         if run == nil, let thread = task.threadID { try await codex.quiesceThread(threadID: thread); try await codex.stopDescendants(threadID: thread) }
         try await store.finishInbox(task.inbound.map(\.guid), state: "cancelled")
         try await stage(messages: ["Stopped \(task.title)."], attachments: [], inbound: inbound, workspace: workspace, permission: permission, epoch: epoch)

@@ -54,8 +54,8 @@ enum SteveCLI {
     or macOS permission prompts. --non-interactive never waits for terminal input.
     --open-permission opens Settings for a human grant; use it separately from
     other setup options. Ordinary setup and doctor do not open Settings.
-    --max-helpers sets research helpers per eligible worker. Only one worker controls
-    the visible Mac at a time. setup/doctor/status JSON includes the model catalog.
+    --max-helpers sets research helpers per eligible worker. Computer workers can
+    run concurrently, sharing the visible Mac. setup/doctor/status JSON includes the model catalog.
     Legacy --model, --effort, --service-tier, --relay-* and --max-operators flags
     remain supported. Do not combine aliases for the same choice.
     start resumes work; stop pauses and cancels it. It does not quit the app.
