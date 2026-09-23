@@ -42,10 +42,33 @@ cp "$scratch_dir/checkouts/swift-atomics/LICENSE.txt" "$app/Contents/Resources/T
 cp "$scratch_dir/checkouts/swift-collections/LICENSE.txt" "$app/Contents/Resources/ThirdPartyLicenses/swift-collections-LICENSE.txt"
 cp "$scratch_dir/checkouts/swift-system/LICENSE.txt" "$app/Contents/Resources/ThirdPartyLicenses/swift-system-LICENSE.txt"
 
+sparkle_root="$scratch_dir/artifacts/sparkle/Sparkle"
+sparkle_framework="$sparkle_root/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+sparkle_config="$repo_dir/updates/sparkle-config.plist"
+if [ ! -d "$sparkle_framework" ] || [ ! -f "$sparkle_config" ]; then
+  echo "Sparkle framework or public update configuration is missing" >&2
+  exit 1
+fi
+mkdir -p "$app/Contents/Frameworks"
+# Sparkle.framework uses versioned symlinks. ditto preserves them and their
+# executable bits, which Sparkle requires for a valid distributable bundle.
+ditto "$sparkle_framework" "$app/Contents/Frameworks/Sparkle.framework"
+cp "$sparkle_root/LICENSE" "$app/Contents/Resources/ThirdPartyLicenses/Sparkle-LICENSE.txt"
+
 # SwiftPM places SQLite.swift and PhoneNumberKit resources beside the binary.
 # They are data bundles only; Steve has no helper executable or bundled imsg.
 find "$bin_dir" -maxdepth 1 -type d -name '*.bundle' ! -name 'SteveNative_SteveNative.bundle' -exec cp -R {} "$app/Contents/Resources/" \;
 cp "$repo_dir/native/Resources/Info.plist" "$app/Contents/Info.plist"
+if [ "${STEVE_DISTRIBUTION_BUILD:-}" = 1 ]; then
+  for key in SUFeedURL SUPublicEDKey SUEnableAutomaticChecks SUAutomaticallyUpdate SUVerifyUpdateBeforeExtraction SURequireSignedFeed SUEnableSystemProfiling; do
+    value=$(/usr/libexec/PlistBuddy -c "Print :$key" "$sparkle_config")
+    /usr/libexec/PlistBuddy -c "Delete :$key" "$app/Contents/Info.plist" >/dev/null 2>&1 || true
+    case "$value" in
+      true|false) /usr/libexec/PlistBuddy -c "Add :$key bool $value" "$app/Contents/Info.plist" ;;
+      *) /usr/libexec/PlistBuddy -c "Add :$key string $value" "$app/Contents/Info.plist" ;;
+    esac
+  done
+fi
 
 # Build the app icon from the canonical PNG. No vector redraw or alternate
 # logo is introduced, so the transparent blue-violet artwork stays identical.
@@ -66,6 +89,12 @@ chmod 755 "$app/Contents/MacOS/Steve"
 # Remove local build paths and debug symbols before the distributable bundle is
 # signed. Swift release binaries otherwise retain checkout-specific paths.
 /usr/bin/strip -S "$app/Contents/MacOS/Steve"
+sparkle="$app/Contents/Frameworks/Sparkle.framework"
+codesign --force --sign "$signing_identity" "$sparkle/Versions/B/XPCServices/Installer.xpc" >/dev/null
+codesign --force --sign "$signing_identity" --preserve-metadata=entitlements "$sparkle/Versions/B/XPCServices/Downloader.xpc" >/dev/null
+codesign --force --sign "$signing_identity" "$sparkle/Versions/B/Autoupdate" >/dev/null
+codesign --force --sign "$signing_identity" "$sparkle/Versions/B/Updater.app" >/dev/null
+codesign --force --sign "$signing_identity" "$sparkle" >/dev/null
 codesign --force --sign "$signing_identity" "$app/Contents/MacOS/Steve" >/dev/null
 codesign --force --sign "$signing_identity" "$app" >/dev/null
 echo "$app"

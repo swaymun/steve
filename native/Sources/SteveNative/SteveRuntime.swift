@@ -151,6 +151,7 @@ actor GatewayCoordinator {
     private var initialized = false
     nonisolated let capturePermit = SteveCapturePermit()
     private var paused = false
+    private var updateRestartReserved = false
     private var pauseTransitionInProgress = false
     private var configuringOwner = false
     private(set) var transportError: String? = "Messages watcher has not started."
@@ -163,14 +164,44 @@ actor GatewayCoordinator {
         self.automation = automation; self.schedulerInterval = schedulerInterval; self.clockNow = clockNow
     }
     func isPaused() -> Bool { paused }
+    /// Reserve an idle restart without persisting a pause. Messages arriving
+    /// before termination remain in the durable inbox for the new process.
+    func reserveUpdateRestart() async -> Bool {
+        let captured = epoch
+        guard updateRestartIsIdle else { return false }
+        do {
+            let tasks = try await store.operatorTasks()
+            let counts = try await store.workCounts()
+            let outbound = try await store.pendingOutbox(now: .distantFuture)
+            guard captured == epoch, updateRestartIsIdle,
+                  counts.pending == 0, counts.running == 0, outbound.isEmpty,
+                  tasks.allSatisfy({ [.completed, .failed, .cancelled, .uncertain].contains($0.state) }) else { return false }
+            updateRestartReserved = true
+            return true
+        } catch { return false }
+    }
+    func cancelUpdateRestart() {
+        guard updateRestartReserved else { return }
+        updateRestartReserved = false
+        scheduleWork()
+    }
+    private var updateRestartIsIdle: Bool {
+        running && !changingBoundary && !configuringOwner && !pauseTransitionInProgress &&
+        !updateRestartReserved && takeover == nil && takeoverReservation == nil &&
+        connectionHandoffToken == nil && approvals.isEmpty && !pollingSchedules &&
+        workTask == nil && senderTask == nil && inFlightTasks.isEmpty &&
+        operatorRuns.isEmpty && steeringTasks.isEmpty && activeWorkers.isEmpty &&
+        computerOwner == nil && loginReservation == nil && privatePhoneDeliveries.isEmpty &&
+        !capturePermit.isActive
+    }
     func authorizeVideo() async throws -> SteveVideoAuthorization {
         let captured = epoch
-        guard running, !paused, !changingBoundary, takeover == nil, takeoverReservation == nil, approvals.isEmpty else {
+        guard running, !paused, !changingBoundary, !updateRestartReserved, takeover == nil, takeoverReservation == nil, approvals.isEmpty else {
             throw RPCError(message: "Resume Steve and finish login or phone control before recording a demonstration.")
         }
         let settings = try await store.getSettings()
         let trusted = try await store.trustedConversation()
-        guard epoch == captured, running, !paused, !changingBoundary, takeover == nil, takeoverReservation == nil, approvals.isEmpty,
+        guard epoch == captured, running, !paused, !changingBoundary, !updateRestartReserved, takeover == nil, takeoverReservation == nil, approvals.isEmpty,
               trusted != nil, let workspace = settings?.workspaceRoot else { throw TaskVideoError.privacy }
         let token = UUID().uuidString
         try capturePermit.issue(token, kind: .video)
@@ -204,7 +235,7 @@ actor GatewayCoordinator {
     /// One bounded tick. The service itself never dispatches messages or tools;
     /// this actor admits each claimed run into the existing durable inbox.
     func pollSchedules(now: Date) async throws {
-        guard let automation, running, !pollingSchedules else { return }
+        guard let automation, running, !pollingSchedules, !updateRestartReserved else { return }
         pollingSchedules = true
         defer { pollingSchedules = false }
         for run in try await automation.runsNeedingReconciliation() where run.state == .enqueued {
@@ -268,6 +299,7 @@ actor GatewayCoordinator {
     func stop() async {
         capturePermit.invalidate()
         running = false
+        updateRestartReserved = false
         cancelApprovals()
         let scheduler = schedulerTask
         scheduler?.cancel(); schedulerTask = nil
@@ -336,6 +368,7 @@ actor GatewayCoordinator {
         }
     }
     func beginSettingsBoundaryChange() async throws {
+        guard !updateRestartReserved else { throw RPCError(message: "Steve is installing an update. Try again after it restarts.") }
         guard await prepareBoundaryChange() else {
             throw RPCError(message: transportError ?? "Could not prepare the settings boundary.")
         }
@@ -353,7 +386,7 @@ actor GatewayCoordinator {
     func agentSettingsDidChange() { scheduleWork() }
 
     func configureOwner(address: String, receiveAddress: String) async throws {
-        guard !configuringOwner, !changingBoundary else { throw RPCError(message: "Connection settings are still changing. Try again in a moment.") }
+        guard !configuringOwner, !changingBoundary, !updateRestartReserved else { throw RPCError(message: "Connection settings are still changing. Try again in a moment.") }
         configuringOwner = true
         defer { configuringOwner = false }
         let address = try SteveOnboarding.ownerAddress(address)
@@ -371,6 +404,7 @@ actor GatewayCoordinator {
         catch { abortSettingsBoundaryChange(error); throw error }
     }
     func setPaused(_ value: Bool) async throws {
+        guard !updateRestartReserved else { throw RPCError(message: "Steve is installing an update. Try again after it restarts.") }
         guard !pauseTransitionInProgress else {
             throw RPCError(message: "Steve is still finishing the previous pause or resume. Try again in a moment.")
         }
@@ -403,7 +437,7 @@ actor GatewayCoordinator {
         let trusted = try await store.trustedConversation()
         let settings = try await store.getSettings()
         let storedEpoch = try await store.gatewayEpoch()
-        guard running, !changingBoundary, epoch == captured, storedEpoch == captured,
+        guard running, !changingBoundary, !updateRestartReserved, epoch == captured, storedEpoch == captured,
               takeover == nil, takeoverReservation == nil,
               let trusted, let workspace = settings?.workspaceRoot, !workspace.isEmpty,
               let permission = settings?.permissionProfile, !permission.isEmpty else {
@@ -504,13 +538,13 @@ actor GatewayCoordinator {
     }
     private func check(_ captured: String, control: Bool = false) throws {
         try Task.checkCancellation()
-        guard running, epoch == captured, !changingBoundary, control || !paused else { throw CancellationError() }
+        guard running, epoch == captured, !changingBoundary, !updateRestartReserved, control || !paused else { throw CancellationError() }
     }
     @discardableResult
     func receive(_ message: SteveInboundMessage) async -> Bool {
         do {
             guard !message.isFromMe, !message.isGroup else { try await store.checkpoint(message.rowID); return true }
-            guard !changingBoundary, !configuringOwner else { return false }
+            guard !changingBoundary, !configuringOwner, !updateRestartReserved else { return false }
             var message = message
             if try await store.ownerSetup() != nil, message.service?.caseInsensitiveCompare("iMessage") != .orderedSame {
                 try await store.checkpoint(message.rowID); return true
@@ -557,6 +591,7 @@ actor GatewayCoordinator {
             var accepted = message
             if let (id, _) = phoneApproval(message.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), message: message) { accepted.approvalID = id }
             guard try await store.acceptInbound(accepted) else { return true }
+            if updateRestartReserved { return true }
             _ = try await handleControl(accepted)
             scheduleWork()
             return true
@@ -654,7 +689,7 @@ actor GatewayCoordinator {
     }
     private func scheduleWork() {
         scheduleDelivery()
-        guard running, !changingBoundary, workTask == nil else { return }
+        guard running, !changingBoundary, !updateRestartReserved, workTask == nil else { return }
         let captured = epoch
         let taskID = UUID()
         workTask = Task {
@@ -675,7 +710,7 @@ actor GatewayCoordinator {
         inFlightTasks[taskID] = workTask
     }
     private func scheduleDelivery() {
-        guard running, !changingBoundary, senderTask == nil else { return }
+        guard running, !changingBoundary, !updateRestartReserved, senderTask == nil else { return }
         let captured = epoch
         let taskID = UUID()
         senderTask = Task {
@@ -1469,6 +1504,8 @@ actor SteveRuntime {
         await gateway.endBoundaryChange()
     }
     func setPaused(_ value: Bool) async throws { try await gateway.setPaused(value) }
+    func reserveUpdateRestart() async -> Bool { await gateway.reserveUpdateRestart() }
+    func cancelUpdateRestart() async { await gateway.cancelUpdateRestart() }
     func boundaryChangeIsActive() async -> Bool { await gateway.boundaryChangeIsActive() }
 
     func configureIdentity(name: String?, personality: String?) async throws {

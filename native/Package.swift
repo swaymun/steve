@@ -11,7 +11,8 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/stephencelis/SQLite.swift.git", revision: "964c300fb0736699ce945c9edb56ecd62eba27a3"),
         .package(url: "https://github.com/marmelroy/PhoneNumberKit.git", from: "4.3.0"),
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.103.0")
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.103.0"),
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", exact: "2.10.0")
     ],
     targets: [
         .target(
@@ -32,10 +33,12 @@ let package = Package(
             dependencies: [
                 "IMsgCore",
                 .product(name: "NIOHTTP1", package: "swift-nio"),
-                .product(name: "NIOPosix", package: "swift-nio")
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "Sparkle", package: "Sparkle")
             ],
             path: "Sources/SteveNative",
-            resources: [.process("Resources")]
+            resources: [.process("Resources")],
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         ),
         .testTarget(
             name: "SteveNativeTests",

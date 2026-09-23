@@ -1,5 +1,5 @@
 {
-  "originHash" : "66de5468db997197899eddec836d4f87392c594498877b2c13a8314bd943c13c",
+  "originHash" : "e1aeda3d474ffc5ec01f79e0874e83bfeb0046f823102cc74e515bf1c6e50d57",
   "pins" : [
     {
       "identity" : "phonenumberkit",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "169ab10234347fb19b37441f2867ace896a284b0",
         "version" : "4.3.0"
+      }
+    },
+    {
+      "identity" : "sparkle",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/sparkle-project/Sparkle.git",
+      "state" : {
+        "revision" : "eef1a539a373c1f1a320624b1130fc5de7b2e100",
+        "version" : "2.10.0"
       }
     },
     {

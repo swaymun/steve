@@ -78,6 +78,17 @@ Licensed under the Apache License 2.0. The complete license is distributed in
 
 Source: https://github.com/apple/swift-system at version `1.8.1`
 
+## Sparkle
+
+Copyright (c) 2006-2013 Andy Matuschak; 2009-2013 Elgato Systems GmbH;
+2011-2014 Kornel Lesiński; 2015-2017 Mayur Pawashe; 2014 C.W. Betts,
+Petroules Corporation, and Big Nerd Ranch
+
+Licensed under the MIT License. The complete upstream license is distributed
+in `Contents/Resources/ThirdPartyLicenses` in the app bundle.
+
+Source: https://github.com/sparkle-project/Sparkle at version `2.10.0`
+
 ## MIT License text
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

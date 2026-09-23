@@ -28,6 +28,11 @@ final class SteveCapturePermit: @unchecked Sendable {
     private let lock = NSLock()
     private var active: (String, Kind)?
 
+    var isActive: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return active != nil
+    }
+
     func issue(_ token: String, kind: Kind) throws {
         lock.lock(); defer { lock.unlock() }
         guard active == nil else { throw RPCError(message: "Screen access is already active.") }

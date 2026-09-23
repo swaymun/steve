@@ -1757,4 +1757,46 @@ final class GatewayLifecycleTests: XCTestCase {
         }
     }
 
+    func testUpdateRestartWaitsForWorkerAndPreservesLaterIntake() async throws {
+        let delivery = #"{"schemaVersion":1,"kind":"delivery_plan","status":"complete","messages":["Fixture result"],"attachments":[]}"#
+        let (store, gateway, messages, codex) = try await setup([relay, worker, delivery, relay, worker, delivery])
+        await codex.hold()
+        await gateway.start()
+        _ = await gateway.receive(inbound("before-update"))
+        try await eventually { await codex.turns == 2 }
+        let whileWorking = await gateway.reserveUpdateRestart()
+        XCTAssertFalse(whileWorking)
+
+        await codex.releaseWorker()
+        try await eventually { await messages.sent.contains("Fixture result") }
+        try await eventually { await gateway.reserveUpdateRestart() }
+        let later = inbound("after-update")
+        let acceptedDuringRestart = await gateway.receive(later)
+        XCTAssertFalse(acceptedDuringRestart)
+        let stateBeforeRestart = try await store.queueState("inbound:after-update")
+        XCTAssertNil(stateBeforeRestart)
+
+        await gateway.cancelUpdateRestart()
+        let acceptedAfterCancel = await gateway.receive(later)
+        XCTAssertTrue(acceptedAfterCancel)
+        try await eventually { await messages.sent.count == 2 }
+        let sent = await messages.sent
+        XCTAssertEqual(sent, ["Fixture result", "Fixture result"])
+    }
+
+    func testUpdateRestartWaitsForCaptureAndPhoneControl() async throws {
+        let (_, gateway, _, _) = try await setup([])
+        await gateway.start()
+        try gateway.capturePermit.issue("video", kind: .video)
+        let duringCapture = await gateway.reserveUpdateRestart()
+        XCTAssertFalse(duringCapture)
+        gateway.capturePermit.revoke("video")
+        try await eventually { await gateway.reserveUpdateRestart() }
+        let phoneBoundaryRejected: Bool
+        do { _ = try await gateway.phoneAccessBoundary(); phoneBoundaryRejected = false }
+        catch { phoneBoundaryRejected = true }
+        XCTAssertTrue(phoneBoundaryRejected)
+        await gateway.cancelUpdateRestart()
+    }
+
 }

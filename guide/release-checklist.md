@@ -17,6 +17,7 @@ This is an acceptance checklist, not a claim of completed validation.
 - The complete public tree and fresh history are scanned for secrets and personal information. Private diagnostics, old handoffs, histories, screenshots, and evaluation PDFs stay private.
 - The original repository remains preserved privately. The public repository has the intended license and only main after landing.
 - Public release artifacts are signed, notarized, stapled, assessed, and hashed as the final downloadable archive. Source builds and locally signed development bundles are not called notarized releases.
+- Automatic-update releases follow [the Sparkle release flow](updates.md). The final ZIP and signed appcast must describe the same build and release URL, and an older-to-newer signed-candidate update must pass before publication.
 - The signed app includes the Apple Events entitlement required by hardened runtime, and a real authorized Messages reply succeeds from that build. The entitlement does not replace the user's Automation permission grant.
 - Task evidence can be recorded and sent as an actual iMessage video attachment, with verified iPhone playback, bounded duration and size, compression/conversion, and optional requested system audio. Login/takeover intervals are excluded; a video supplements explicit outcome verification.
 - The technical article describes the final implementation and labels remaining acceptance gaps. Screenshots and examples are reviewed for public disclosure.

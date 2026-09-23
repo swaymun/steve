@@ -108,7 +108,12 @@ $('connect').addEventListener('click', async () => {
       catch { await disconnect(false, 'Connection expired. Steve remains paused.'); }
     }, 4000);
     poll();
-  } catch (error) { $('connect').disabled = false; message(error.message, true); }
+  } catch (error) {
+    $('connect').disabled = false;
+    $('connection').textContent = 'Disconnected';
+    message('Not connected. Ask Steve for a fresh link.');
+    message(error.message, true);
+  }
 });
 $('screen').addEventListener('click', event => {
   const rect = $('screen').getBoundingClientRect();

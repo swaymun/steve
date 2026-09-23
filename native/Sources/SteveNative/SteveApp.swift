@@ -115,6 +115,7 @@ final class SteveModel: ObservableObject {
     @Published var requiresLogin = false
     @Published var phoneOpen = false
     @Published var savingOwner = false
+    @Published var automaticUpdatesEnabled = false
     @Published var addresses: [ReceiveAddress] = []
     @Published var icloudAccount = ""
     @Published var pairing: PairingChallenge?
@@ -125,6 +126,7 @@ final class SteveModel: ObservableObject {
     private var taskVideo: SteveTaskVideoControl?
     private var localControl: SteveLocalControlServer?
     private var pairingMonitor: Task<Void, Never>?
+    private var updater: SteveUpdater?
 
     init() {
         runtime = try? SteveRuntime()
@@ -144,6 +146,8 @@ final class SteveModel: ObservableObject {
                     return await self.handleControl(request, runtime: runtime)
                 }
                 await runtime.start(); await self.updateSnapshot(from: runtime)
+                self.updater = SteveUpdater(runtime: runtime)
+                self.automaticUpdatesEnabled = self.updater?.automaticUpdatesEnabled ?? false
                 do { try await self.phoneAccess?.restore() } catch { self.message = error.localizedDescription }
             } catch { self.message = error.localizedDescription }
         }
@@ -155,7 +159,19 @@ final class SteveModel: ObservableObject {
         await runtime?.stop()
         localControl = nil
     }
-    func sync() async { if let runtime { await updateSnapshot(from: runtime) } }
+    func sync() async {
+        if let runtime { await updateSnapshot(from: runtime) }
+        if let updater, automaticUpdatesEnabled != updater.automaticUpdatesEnabled {
+            automaticUpdatesEnabled = updater.automaticUpdatesEnabled
+        }
+    }
+    var canCheckForUpdates: Bool { updater?.canCheckForUpdates == true }
+    var updatesAvailable: Bool { updater?.isAvailable == true }
+    func checkForUpdates() { updater?.checkForUpdates() }
+    func setAutomaticUpdatesEnabled(_ enabled: Bool) {
+        updater?.setAutomaticUpdatesEnabled(enabled)
+        automaticUpdatesEnabled = updater?.automaticUpdatesEnabled ?? false
+    }
     private func handleControl(_ request: SteveControlRequest, runtime: SteveRuntime) async -> SteveControlResponse {
         if request.command == "video", let taskVideo { return await taskVideo.handle(request) }
         if request.command == "phone" {
@@ -399,7 +415,14 @@ struct StevePopover: View {
                     }
                 }.padding(.bottom, 8)
             }
-            DisclosureGroup("Advanced", isExpanded: $advancedExpanded) { action("Full Disk Access", action: model.openFullDiskAccessSettings); action("Diagnostics", action: model.openDiagnostics) }
+            DisclosureGroup("Advanced", isExpanded: $advancedExpanded) {
+                if model.updatesAvailable {
+                    action("Check for Updates", disabled: !model.canCheckForUpdates, action: model.checkForUpdates)
+                    Toggle("Automatic Updates", isOn: Binding(get: { model.automaticUpdatesEnabled }, set: model.setAutomaticUpdatesEnabled))
+                }
+                action("Full Disk Access", action: model.openFullDiskAccessSettings)
+                action("Diagnostics", action: model.openDiagnostics)
+            }
             Button("Quit Steve") { NSApplication.shared.terminate(nil) }.buttonStyle(.plain).foregroundStyle(.red).padding(8)
         }.padding(14).frame(width: 390).background(Color(nsColor: .windowBackgroundColor)).sheet(isPresented: $model.phoneOpen) { PhoneView(model: model) }.task {
             model.refresh()
