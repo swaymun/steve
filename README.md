@@ -100,7 +100,7 @@ Messages content and relevant task context are sent to Codex to process requests
 
 Steve is a native SwiftUI menu-bar app that uses your installed Codex to carry out requests and keep task context. Models and task settings are [configurable](guide/setup.md#coordinator-and-worker-settings).
 
-Current source can work on two independent tasks at once by default, including tasks that use the browser or other Mac apps. They share the same desktop and browser profile, so simultaneous changes to the same page can interfere. The signed v1.0.0 download still runs computer tasks one at a time; this change awaits the next release. Say “Also…” to start another goal, correct a task in ordinary language, or ask Steve to cancel a named task.
+Steve can work on two independent tasks at once by default, including tasks that use the browser or other Mac apps. They share the same desktop and browser profile, so simultaneous changes to the same page can interfere. Say “Also…” to start another goal, correct a task in ordinary language, or ask Steve to cancel a named task.
 
 Native Computer Use operates the visible browser and apps. Steve reads the local Messages database and sends replies through public AppleScript. Queues, saved preferences, reminders, and task state persist across restarts. Ambiguous executions or sends need review and are never automatically replayed.
 
