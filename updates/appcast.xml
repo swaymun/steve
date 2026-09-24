@@ -5,16 +5,16 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
         <title>Steve</title>
         <item>
             <title>1.0.0</title>
-            <pubDate>Wed, 23 Sep 2026 15:29:25 -0400</pubDate>
+            <pubDate>Wed, 23 Sep 2026 21:34:48 -0400</pubDate>
             <link>https://github.com/swaymun/steve/releases/tag/v1.0.0</link>
-            <sparkle:version>27</sparkle:version>
+            <sparkle:version>28</sparkle:version>
             <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/swaymun/steve/releases/download/v1.0.0/Steve-macOS.zip" length="6941733" type="application/octet-stream" sparkle:edSignature="0Tac67CF/SefEam6pT+vngF2zYmQwklN2CfXXYQygaz4tuMerwP1WVE+kwx51GKuBbvoHY1N/DWDOdFthI3FBQ=="></enclosure>
+            <enclosure url="https://github.com/swaymun/steve/releases/download/v1.0.0/Steve-macOS.zip" length="6956369" type="application/octet-stream" sparkle:edSignature="crNh3hTSpX9Sge3NO048CYq9Q0wR/hHm1VG8GTxBXiUZ+lzjpZ8Htur8kARdDdJhGlmb85lUGF0UrDgR4O94Dw=="></enclosure>
         </item>
     </channel>
 </rss><!-- sparkle-signatures:
-edSignature: ycbcZcOoT7eKVSdKdF5LX7dfTAYpFc2irvxg5HHdo2zWFs2X9I8BlXTtdorT0KXv6Yd1Laqlp8tgvP11+BWpDw==
+edSignature: ZGL4oyPQ5EuZvGpN8Q1Y9knOyvWyyYS6oAljqog/gpoHrFi8kOl+/xSqtHcnhDVVRZ8EhLMZAbdOeFBtuqhlBw==
 length: 1189
 -->
