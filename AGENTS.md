@@ -33,6 +33,8 @@ Steve is a macOS native SwiftUI menu-bar application. Preserve these invariants:
 - Keep Steve's App Server session and SQLite storage under its private runtime. Reuse shared Codex setup without sharing the desktop task index, and keep Computer Use on its existing installed home. Import only an exact Steve-originated legacy transcript when resuming it; never copy all desktop history.
 - Treat the workspace root and paired chat as security boundaries. Canonicalize paths and fail closed on sender/chat mismatches.
 - Keep protocol fixtures deterministic. Prefer unit and functional tests over broad smoke tests.
+- Before adding a test, name the observable contract, a credible regression, and why existing coverage would miss it. Give each contract one primary test at the strongest practical boundary; extend an existing case for another input instead of replaying the same path in a helper test and an RPC or gateway test. Keep a lower-level test when it protects a distinct failure mode, especially security or wire compatibility. Avoid production hooks that exist only for tests.
+- When pruning tests, preserve the contract in its primary test, run the focused check and the required full checks below, and report measured test and production line changes separately. Treat CI time savings as estimates unless measured on the runner.
 - Do not add private Messages APIs or SIP-disabling behavior. Steve uses read-only Messages database access and public AppleScript-backed sending.
 
 Run before handing development work back:

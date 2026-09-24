@@ -447,7 +447,7 @@ final class CodexRPCConnectionTests: XCTestCase {
     func testTurnProgressReportsOnlyCompletedCommentary() async throws {
         let rpc = connection(#"""
         read -r first
-        printf '%s\n' '{"id":1,"result":{}}' '{"method":"item/agentMessage/delta","params":{"threadId":"t","turnId":"u","itemId":"commentary","delta":"Working"}}' '{"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"id":"tool","type":"commandExecution","status":"completed"}}}' '{"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"id":"commentary","type":"agentMessage","phase":"commentary","text":"Working safely."}}}' '{"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"id":"final","type":"agentMessage","phase":"final_answer","text":"Done."}}}' '{"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed"}}}'
+        printf '%s\n' '{"id":1,"result":{}}' '{"method":"item/agentMessage/delta","params":{"threadId":"t","turnId":"u","itemId":"commentary","delta":"Working"}}' '{"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"id":"tool","type":"commandExecution","status":"completed"}}}' '{"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"id":"commentary","type":"agentMessage","phase":"commentary","text":"Working safely."}}}' '{"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"id":"legacy","type":"agentMessage","text":"Compatibility response. "}}}' '{"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"id":"final","type":"agentMessage","phase":"final_answer","text":"Done."}}}' '{"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed"}}}'
         read -r hold
         """#)
         defer { rpc.stop() }
@@ -458,7 +458,7 @@ final class CodexRPCConnectionTests: XCTestCase {
         }
         let events = await recorder.recorded()
         XCTAssertEqual(events, [.init(phase: .commentary, text: "Working safely.")])
-        XCTAssertEqual(result.text, "Done.")
+        XCTAssertEqual(result.text, "Compatibility response. Done.")
     }
 
     func testCancellingOneWaitWakesItWithoutStoppingAnotherTurn() async throws {
